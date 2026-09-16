@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Test / coverage output
+coverage/
+.nyc_output/
+
+# Local config — machine-specific paths (svctlPath, default context)
+.kube-tools.yaml
+*.local.yaml
+.env
+.env.*
+
+# Anything that could hold cluster credentials
+kubeconfig
+*.kubeconfig
+*.pem
+*.key
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / packaging artifacts
+dist/
+build/
+*.tgz

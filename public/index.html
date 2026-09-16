@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kube-tools</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="logo">⎈</span>
+    <span class="wordmark">kube-tools</span>
+
+    <div class="target" id="target"></div>
+
+    <span class="conn" id="status">connecting…</span>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="pods">Pods</button>
+  </nav>
+
+  <div class="toolbar">
+    <div class="field">
+      <label for="service">Service</label>
+      <select id="service"></select>
+    </div>
+
+    <div class="field">
+      <label for="env">Environment</label>
+      <select id="env"></select>
+    </div>
+
+    <div class="field grow">
+      <label for="filter">Search</label>
+      <input id="filter" type="search" placeholder="Filter by name…" autocomplete="off">
+    </div>
+
+    <button class="primary" id="refresh">
+      <span class="spinner hidden" id="btn-spinner"></span>Refresh
+    </button>
+  </div>
+
+  <main>
+    <div id="banner" class="banner hidden"></div>
+
+    <nav class="subtabs" id="subtabs"></nav>
+
+    <div class="summary">
+      <span class="spinner dim hidden" id="head-spinner"></span>
+      <span id="meta"></span>
+    </div>
+
+    <div id="groups"></div>
+  </main>
+
+  <dialog id="confirm" class="modal">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body"></p>
+
+      <label class="modal-field hidden" id="confirm-input-wrap">
+        <span>Replicas</span>
+        <input id="confirm-input" type="number" min="0" max="50" step="1">
+      </label>
+
+      <pre id="confirm-cmd"></pre>
+
+      <div class="modal-actions">
+        <button value="cancel" class="mini" id="confirm-cancel">Cancel</button>
+        <button value="ok" class="primary danger" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

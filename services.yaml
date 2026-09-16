@@ -1,0 +1,18 @@
+# Maps a (service, env) pair to the kube context + namespace it lives in.
+#
+# Find the values for a new entry by logging in with svctl once, then running:
+#   kubectl config current-context
+#   kubectl config view --minify -o jsonpath='{..namespace}'
+
+# How long to wait for kubectl before giving up. Raise it if your cluster or
+# VPN is slow; each service/env may also set its own to override this.
+timeoutSeconds: 60
+
+services:
+  - name: athenaapp
+    label: Athena App
+    envs:
+      - name: stg
+        label: Staging
+        context: cluster02-staging-indodana-cermati-indodana-athena-stg
+        namespace: cermati-indodana-athena-stg
