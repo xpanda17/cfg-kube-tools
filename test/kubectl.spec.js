@@ -656,6 +656,480 @@ describe('kubectl', () => {
     });
   });
 
+  describe('getJobsForCronJob', () => {
+    const payload = {
+      items: [
+        {
+          metadata: {
+            name: 'reminder-29823960',
+            ownerReferences: [{ kind: 'CronJob', name: 'atwcron-reminder' }],
+          },
+          spec: {},
+          status: {},
+        },
+        {
+          metadata: {
+            name: 'reminder-29823900',
+            ownerReferences: [{ kind: 'CronJob', name: 'atwcron-reminder' }],
+          },
+          spec: { suspend: true },
+          status: { completionTime: '2026-09-16T01:05:00Z' },
+        },
+        {
+          metadata: {
+            name: 'settlement-29823960',
+            ownerReferences: [{ kind: 'CronJob', name: 'atwcron-settlement' }],
+          },
+          spec: {},
+          status: {},
+        },
+        { metadata: { name: 'hand-rolled-job' }, spec: {}, status: {} },
+      ],
+    };
+
+    function kubectlFor(stdout) {
+      return proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({ stdout, stderr: '', code: 0 }),
+      });
+    }
+
+    it('asks for json, scoped to the target', async () => {
+      const calls = [];
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': {
+          run: (bin, args, options) => {
+            calls.push({ bin, args, options });
+            return Promise.resolve({ stdout: '{"items":[]}', stderr: '', code: 0 });
+          },
+        },
+      });
+
+      await kubectl.getJobsForCronJob(
+        { context: 'ctx-stg', namespace: 'ns-stg', timeoutSeconds: 30 },
+        'atwcron-reminder'
+      );
+
+      expect(calls[0].bin).to.equal('kubectl');
+      expect(calls[0].args).to.deep.equal([
+        'get',
+        'jobs',
+        '--context',
+        'ctx-stg',
+        '--namespace',
+        'ns-stg',
+        '--request-timeout=30s',
+        '-o',
+        'json',
+      ]);
+      expect(calls[0].options.timeout).to.be.above(30000);
+    });
+
+    it('keeps only the jobs this cronjob owns', async () => {
+      const kubectl = kubectlFor(JSON.stringify(payload));
+
+      const result = await kubectl.getJobsForCronJob(
+        { context: 'c', namespace: 'n' },
+        'atwcron-reminder'
+      );
+
+      expect(result.jobs.map((job) => job.name)).to.deep.equal([
+        'reminder-29823960',
+        'reminder-29823900',
+      ]);
+    });
+
+    it('ignores a job owned by nothing at all', async () => {
+      const kubectl = kubectlFor(
+        JSON.stringify({ items: [{ metadata: { name: 'hand-rolled-job' }, spec: {}, status: {} }] })
+      );
+
+      const result = await kubectl.getJobsForCronJob({ context: 'c', namespace: 'n' }, 'cron');
+
+      expect(result.jobs).to.deep.equal([]);
+    });
+
+    it('ignores a job whose owner is a cronjob of the same name but another kind', async () => {
+      const kubectl = kubectlFor(
+        JSON.stringify({
+          items: [{
+            metadata: { name: 'j', ownerReferences: [{ kind: 'Job', name: 'cron' }] },
+            spec: {},
+            status: {},
+          }],
+        })
+      );
+
+      const result = await kubectl.getJobsForCronJob({ context: 'c', namespace: 'n' }, 'cron');
+
+      expect(result.jobs).to.deep.equal([]);
+    });
+
+    it('reports suspension and completion per job', async () => {
+      const kubectl = kubectlFor(JSON.stringify(payload));
+
+      const result = await kubectl.getJobsForCronJob(
+        { context: 'c', namespace: 'n' },
+        'atwcron-reminder'
+      );
+
+      expect(result.jobs[0]).to.deep.equal({
+        name: 'reminder-29823960',
+        suspended: false,
+        finished: false,
+      });
+      expect(result.jobs[1]).to.deep.equal({
+        name: 'reminder-29823900',
+        suspended: true,
+        finished: true,
+      });
+    });
+
+    it('surfaces a failure instead of an empty list', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({
+          stdout: '',
+          stderr: 'Error from server (Forbidden): jobs.batch is forbidden',
+          code: 1,
+        }),
+      });
+
+      const result = await kubectl.getJobsForCronJob({ context: 'c', namespace: 'n' }, 'cron');
+
+      expect(result.error.kind).to.equal('rbac');
+      expect(result.jobs).to.equal(undefined);
+    });
+  });
+
+  describe('setCronJobSuspend', () => {
+    const target = { context: 'ctx-stg', namespace: 'ns-stg', timeoutSeconds: 30 };
+
+    function jobItem(name, suspended, finished) {
+      return {
+        metadata: { name, ownerReferences: [{ kind: 'CronJob', name: 'atwcron-reminder' }] },
+        spec: suspended ? { suspend: true } : {},
+        status: finished ? { completionTime: '2026-09-16T01:05:00Z' } : {},
+      };
+    }
+
+    // Each call answers from the script in order, so a multi-step run can be
+    // driven end to end, failure included.
+    function scripted(calls, script) {
+      return proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': {
+          run: (bin, args, options) => {
+            calls.push({ bin, args, options });
+            const next = script[calls.length - 1];
+
+            return Promise.resolve(next || { stdout: 'patched', stderr: '', code: 0 });
+          },
+        },
+      });
+    }
+
+    function patchTargets(calls) {
+      return calls.filter((call) => call.args[0] === 'patch').map((call) => call.args[2]);
+    }
+
+    function jobsResponse(items) {
+      return { stdout: JSON.stringify({ items }), stderr: '', code: 0 };
+    }
+
+    it('patches the cronjob with a merge patch when suspending', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, []);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true);
+
+      expect(calls).to.have.lengthOf(1);
+      expect(calls[0].bin).to.equal('kubectl');
+      expect(calls[0].args).to.deep.equal([
+        'patch',
+        'cronjob',
+        'atwcron-reminder',
+        '--type=merge',
+        '-p',
+        '{"spec":{"suspend":true}}',
+        '--context',
+        'ctx-stg',
+        '--namespace',
+        'ns-stg',
+        '--request-timeout=30s',
+      ]);
+      expect(result.steps).to.deep.equal(['atwcron-reminder schedule suspended']);
+    });
+
+    it('sends false, not a string, when resuming', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, []);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', false);
+
+      expect(calls[0].args).to.include('{"spec":{"suspend":false}}');
+      expect(result.steps).to.deep.equal(['atwcron-reminder schedule resumed']);
+    });
+
+    it('does not look at the jobs unless asked to', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, []);
+
+      await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true, false);
+
+      expect(calls).to.have.lengthOf(1);
+      expect(calls.map((call) => call.args[1])).to.deep.equal(['cronjob']);
+    });
+
+    it('suspends every running job, skipping the finished and the already suspended', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        { stdout: 'patched', stderr: '', code: 0 },
+        jobsResponse([
+          jobItem('reminder-running', false, false),
+          jobItem('reminder-done', false, true),
+          jobItem('reminder-already', true, false),
+          jobItem('reminder-second', false, false),
+        ]),
+      ]);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true, true);
+
+      expect(calls[1].args.slice(0, 2)).to.deep.equal(['get', 'jobs']);
+      expect(patchTargets(calls)).to.deep.equal([
+        'atwcron-reminder',
+        'reminder-running',
+        'reminder-second',
+      ]);
+      expect(result.steps).to.deep.equal([
+        'atwcron-reminder schedule suspended',
+        'reminder-running suspended',
+        'reminder-second suspended',
+      ]);
+    });
+
+    it('patches a job with the same merge patch as the cronjob', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        { stdout: 'patched', stderr: '', code: 0 },
+        jobsResponse([jobItem('reminder-running', false, false)]),
+      ]);
+
+      await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true, true);
+
+      expect(calls[2].args).to.deep.equal([
+        'patch',
+        'job',
+        'reminder-running',
+        '--type=merge',
+        '-p',
+        '{"spec":{"suspend":true}}',
+        '--context',
+        'ctx-stg',
+        '--namespace',
+        'ns-stg',
+        '--request-timeout=30s',
+      ]);
+    });
+
+    it('resumes only the jobs that are actually suspended', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        { stdout: 'patched', stderr: '', code: 0 },
+        jobsResponse([
+          jobItem('reminder-suspended', true, false),
+          jobItem('reminder-running', false, false),
+        ]),
+      ]);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', false, true);
+
+      expect(patchTargets(calls)).to.deep.equal([
+        'atwcron-reminder',
+        'reminder-suspended',
+      ]);
+      expect(result.steps[1]).to.equal('reminder-suspended resumed');
+    });
+
+    it('never touches a finished job, even a suspended one', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        { stdout: 'patched', stderr: '', code: 0 },
+        jobsResponse([jobItem('reminder-done', true, true)]),
+      ]);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', false, true);
+
+      expect(calls).to.have.lengthOf(2);
+      expect(result.steps).to.deep.equal([
+        'atwcron-reminder schedule resumed',
+        'no running jobs to resume',
+      ]);
+    });
+
+    it('says so when no job qualifies, rather than reporting nothing', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        { stdout: 'patched', stderr: '', code: 0 },
+        jobsResponse([]),
+      ]);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true, true);
+
+      expect(result.steps).to.deep.equal([
+        'atwcron-reminder schedule suspended',
+        'no running jobs to suspend',
+      ]);
+    });
+
+    it('stops at the cronjob patch when it fails, with no steps taken', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        {
+          stdout: '',
+          stderr: 'Error from server (Forbidden): cronjobs.batch is forbidden',
+          code: 1,
+        },
+      ]);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true, true);
+
+      expect(calls).to.have.lengthOf(1);
+      expect(result.error.kind).to.equal('rbac');
+      expect(result.steps).to.deep.equal([]);
+    });
+
+    it('keeps the schedule step when the job listing fails', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        { stdout: 'patched', stderr: '', code: 0 },
+        { stdout: '', stderr: 'Unable to connect to the server: dial tcp', code: 1 },
+      ]);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true, true);
+
+      expect(result.error.kind).to.equal('network');
+      expect(result.steps).to.deep.equal(['atwcron-reminder schedule suspended']);
+    });
+
+    it('returns the steps already taken when a job patch fails midway', async () => {
+      const calls = [];
+      const kubectl = scripted(calls, [
+        { stdout: 'patched', stderr: '', code: 0 },
+        jobsResponse([
+          jobItem('reminder-one', false, false),
+          jobItem('reminder-two', false, false),
+          jobItem('reminder-three', false, false),
+        ]),
+        { stdout: 'patched', stderr: '', code: 0 },
+        { stdout: '', stderr: 'Error from server (Forbidden): jobs.batch is forbidden', code: 1 },
+      ]);
+
+      const result = await kubectl.setCronJobSuspend(target, 'atwcron-reminder', true, true);
+
+      // The third job is never attempted: the run stops at the failure.
+      expect(calls).to.have.lengthOf(4);
+      expect(result.error.kind).to.equal('rbac');
+      expect(result.steps).to.deep.equal([
+        'atwcron-reminder schedule suspended',
+        'reminder-one suspended',
+      ]);
+    });
+  });
+
+  describe('setJobSuspend', () => {
+    function stubbedKubectl(calls, result) {
+      return proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': {
+          run: (bin, args, options) => {
+            calls.push({ bin, args, options });
+            return Promise.resolve(result);
+          },
+        },
+      });
+    }
+
+    it('patches the one job, not its cronjob', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, {
+        stdout: 'job.batch/reminder-29823960 patched',
+        stderr: '',
+        code: 0,
+      });
+
+      const result = await kubectl.setJobSuspend(
+        { context: 'ctx-stg', namespace: 'ns-stg', timeoutSeconds: 30 },
+        'reminder-29823960',
+        true
+      );
+
+      expect(calls[0].bin).to.equal('kubectl');
+      expect(calls[0].args).to.deep.equal([
+        'patch',
+        'job',
+        'reminder-29823960',
+        '--type=merge',
+        '-p',
+        '{"spec":{"suspend":true}}',
+        '--context',
+        'ctx-stg',
+        '--namespace',
+        'ns-stg',
+        '--request-timeout=30s',
+      ]);
+      expect(result.message).to.equal('job.batch/reminder-29823960 patched');
+    });
+
+    it('sends a json boolean, not a string, when resuming', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '', stderr: '', code: 0 });
+
+      await kubectl.setJobSuspend({ context: 'c', namespace: 'n' }, 'job-1', false);
+
+      expect(calls[0].args[5]).to.equal('{"spec":{"suspend":false}}');
+      expect(JSON.parse(calls[0].args[5]).spec.suspend).to.equal(false);
+    });
+
+    it('applies the target timeout to kubectl and the executor', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '', stderr: '', code: 0 });
+
+      await kubectl.setJobSuspend(
+        { context: 'c', namespace: 'n', timeoutSeconds: 45 },
+        'job-1',
+        true
+      );
+
+      expect(calls[0].args).to.include('--request-timeout=45s');
+      expect(calls[0].options.timeout).to.be.above(45000);
+    });
+
+    it('falls back to its own message when kubectl says nothing', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '  \n', stderr: '', code: 0 });
+
+      expect(
+        (await kubectl.setJobSuspend({ context: 'c', namespace: 'n' }, 'job-1', true)).message
+      ).to.equal('job-1 suspended');
+      expect(
+        (await kubectl.setJobSuspend({ context: 'c', namespace: 'n' }, 'job-1', false)).message
+      ).to.equal('job-1 resumed');
+    });
+
+    it('classifies a failure rather than throwing', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({
+          stdout: '',
+          stderr: 'Error from server (NotFound): jobs.batch "job-1" not found',
+          code: 1,
+        }),
+      });
+
+      const result = await kubectl.setJobSuspend({ context: 'c', namespace: 'n' }, 'job-1', true);
+
+      expect(result.error.kind).to.equal('unknown');
+      expect(result.error.raw).to.contain('not found');
+      expect(result.message).to.equal(undefined);
+    });
+  });
+
   describe('classifyError', () => {
     const kubectl = require('../lib/k8s/kubectl');
 

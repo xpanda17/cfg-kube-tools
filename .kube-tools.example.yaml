@@ -1,0 +1,33 @@
+# Machine-local config for kube-tools. Copy this file to `.kube-tools.yaml`
+# (same directory) and edit it — `.kube-tools.yaml` is gitignored, because every
+# machine checks the repos out somewhere else.
+#
+#   cp .kube-tools.example.yaml .kube-tools.yaml
+#
+# There is no built-in default for any of this: svctl misbehaves when it is run
+# from the wrong working directory, so the app refuses to guess.
+
+# REQUIRED. The directory your service repos are checked out in — the PARENT of
+# the repo that contains `cli/svctl`, not the repo itself.
+#
+#   ~/Desktop/cermati/athena/cli/svctl   <- the binary
+#   ~/Desktop/cermati                    <- workspaceRoot
+#
+# A leading `~` is expanded to your home directory. The result must be absolute.
+# Each service names its own repo directory under this root via `repo:` in
+# services.yaml, and pipelines are run with cwd = <workspaceRoot>/<repo>.
+workspaceRoot: ~/Desktop/cermati
+
+# OPTIONAL. Overrides how the image version is scraped out of the containerize
+# log before it is handed to kube-deploy. Leave it null unless the build changes
+# the shape of the version token.
+#
+# The default matches the real token shape for the environment being deployed,
+# e.g. for `stg`:  stg-20260915T141826-cf2118ba
+#   \bstg-\d{8}T\d{6}-[0-9a-f]{7,40}\b
+#
+# Set it to a JavaScript regular expression SOURCE (no slashes, no flags); it is
+# compiled with the `g` flag and the LAST match in the containerize output wins.
+# The captured token is re-checked against this same pattern before it is passed
+# to kube-deploy, so a pattern that matches loose text will be rejected.
+versionPattern: null

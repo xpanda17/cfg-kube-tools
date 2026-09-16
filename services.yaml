@@ -11,6 +11,13 @@ timeoutSeconds: 60
 services:
   - name: athenaapp
     label: Athena App
+    # Pipeline defaults for svctl. `repo` is the directory under workspaceRoot
+    # (.kube-tools.yaml) that holds cli/svctl and is used as the working
+    # directory; `build` is the service name `containerize` is run with, which
+    # is NOT the deployment name (athena builds the image, athenaapp and the
+    # workers deploy it).
+    repo: athena
+    build: athena
     envs:
       - name: stg
         label: Staging

@@ -3,6 +3,7 @@
 
 const { start } = require('../lib/server');
 const portforward = require('../lib/k8s/portforward');
+const jobs = require('../lib/jobs');
 
 const DEFAULT_PORT = 14777;
 
@@ -31,11 +32,12 @@ async function main() {
   console.log(`kube-tools listening on http://127.0.0.1:${port}`);
   console.log('Press Ctrl+C to stop.');
 
-  // Port forwards are child processes; leaving them behind would hold ports
-  // open after the server is gone.
+  // Port forwards and pipeline runs are child processes; leaving them behind
+  // would hold ports open, or keep an svctl build attached to a dead server.
   ['SIGINT', 'SIGTERM'].forEach((signal) => {
     process.on(signal, () => {
       portforward.stopAll();
+      jobs.stopAll();
       process.exit(0);
     });
   });

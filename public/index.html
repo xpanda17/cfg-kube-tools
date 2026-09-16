@@ -16,10 +16,14 @@
     <span class="conn" id="status">connecting…</span>
   </header>
 
-  <nav class="tabs">
+  <nav class="tabs" id="tabs">
     <button class="tab active" data-tab="pods">Pods</button>
+    <button class="tab" data-tab="deploy">Stable Deployment</button>
   </nav>
 
+  <!-- Service and Environment are shared by both tabs: the deploy form targets
+       the same service/env the pod list is pointed at. Search and Refresh only
+       act on the pod table, so they are hidden on the Deploy tab. -->
   <div class="toolbar">
     <div class="field">
       <label for="service">Service</label>
@@ -31,28 +35,126 @@
       <select id="env"></select>
     </div>
 
-    <div class="field grow">
+    <div class="field grow pods-only" id="filter-field">
       <label for="filter">Search</label>
       <input id="filter" type="search" placeholder="Filter by name…" autocomplete="off">
     </div>
 
-    <button class="primary" id="refresh">
+    <button class="primary pods-only" id="refresh">
       <span class="spinner hidden" id="btn-spinner"></span>Refresh
     </button>
   </div>
 
-  <main>
-    <div id="banner" class="banner hidden"></div>
+  <section class="panel" id="panel-pods">
+    <main>
+      <div id="banner" class="banner hidden"></div>
 
-    <nav class="subtabs" id="subtabs"></nav>
+      <nav class="subtabs" id="subtabs"></nav>
 
-    <div class="summary">
-      <span class="spinner dim hidden" id="head-spinner"></span>
-      <span id="meta"></span>
-    </div>
+      <div class="summary">
+        <span class="spinner dim hidden" id="head-spinner"></span>
+        <span id="meta"></span>
+      </div>
 
-    <div id="groups"></div>
-  </main>
+      <div id="groups"></div>
+    </main>
+  </section>
+
+  <section class="panel hidden" id="panel-deploy">
+    <main>
+      <div id="deploy-banner" class="banner hidden"></div>
+
+      <div id="deploy-form" class="card">
+        <h2>Stable deployment</h2>
+        <p class="lede">
+          Containerizes once and then rolls that one image out to every deployment
+          you pick, so a fan-out cannot end up with two different builds. Runs the
+          Jenkins pipelines through svctl.
+        </p>
+
+        <div class="deploy-grid">
+          <div class="field">
+            <label for="deploy-build">Build name</label>
+            <input id="deploy-build" type="text" autocomplete="off" spellcheck="false"
+                   placeholder="athena">
+            <span class="hint" id="deploy-build-hint"></span>
+          </div>
+
+          <div class="field">
+            <label for="deploy-env">Environment</label>
+            <select id="deploy-env"></select>
+            <span class="hint">Shared with the toolbar above.</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="deploy-add">Deploy to</label>
+          <div id="deploy-targets" class="target-list"></div>
+
+          <div class="add-row">
+            <input id="deploy-add" type="text" autocomplete="off" spellcheck="false"
+                   placeholder="Not listed? Type a deployment name…">
+            <button class="mini" id="deploy-add-btn" type="button">+ Add</button>
+          </div>
+
+          <span class="hint">
+            The list is built from the pods loaded for this service and environment,
+            so a deployment scaled to zero will not appear — add it by name.
+          </span>
+        </div>
+
+        <label class="check" for="deploy-skip">
+          <input id="deploy-skip" type="checkbox">
+          <span>
+            Skip containerize
+            <em>deploy an image Jenkins has already built</em>
+          </span>
+        </label>
+
+        <!-- Without a containerize step nothing produces a version, so the
+             server requires an explicit one rather than falling back to
+             'latest' — which during a fan-out can be someone else's build. -->
+        <div class="field hidden" id="deploy-version-field">
+          <label for="deploy-version">Image version</label>
+          <input id="deploy-version" type="text" autocomplete="off" spellcheck="false">
+          <span class="hint" id="deploy-version-hint"></span>
+        </div>
+
+        <p id="deploy-error" class="error hidden"></p>
+
+        <pre id="deploy-preview"></pre>
+
+        <div class="deploy-actions">
+          <button class="primary danger" id="deploy-run" disabled>Run deployment…</button>
+        </div>
+      </div>
+
+      <div id="deploy-run-view" class="hidden">
+        <div class="run-head">
+          <span id="run-status"></span>
+          <span class="run-title" id="run-title"></span>
+          <span class="run-elapsed" id="run-elapsed"></span>
+          <button class="mini danger hidden" id="run-cancel">Cancel run…</button>
+          <button class="mini hidden" id="run-back">New deployment</button>
+        </div>
+
+        <div class="version-card hidden" id="run-version">
+          <span class="version-label">Image version</span>
+          <span class="version-value" id="run-version-value"></span>
+          <span class="version-note" id="run-version-note"></span>
+        </div>
+
+        <div class="steps" id="run-steps"></div>
+
+        <div class="log-head">
+          <span>Output</span>
+          <span class="log-note" id="run-note"></span>
+        </div>
+
+        <pre class="log" id="run-log" tabindex="0"></pre>
+      </div>
+    </main>
+  </section>
 
   <dialog id="confirm" class="modal">
     <form method="dialog">

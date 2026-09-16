@@ -30,6 +30,15 @@ const MEMORY_PATTERN = /^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|K|M|G|T)?$/;
 const JOB_NAME_PATTERN = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
 const JOB_NAME_MAX = 63;
 
+// Build and deployment names reach svctl as argv, so they are checked against
+// the same RFC 1123 shape here: a typo fails in the form rather than after a
+// Jenkins build has already been triggered.
+const DEPLOY_NAME_PATTERN = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+const DEPLOY_NAME_MAX = 63;
+const NAME_SHAPE =
+  `lowercase alphanumeric, '-' or '.', start and end with alphanumeric, ` +
+  `at most ${DEPLOY_NAME_MAX} characters.`;
+
 const el = {
   service: document.getElementById('service'),
   env: document.getElementById('env'),
@@ -59,6 +68,37 @@ const el = {
   formCancel: document.getElementById('form-cancel'),
   status: document.getElementById('status'),
   target: document.getElementById('target'),
+  tabs: document.getElementById('tabs'),
+  tabDeploy: document.querySelector('.tab[data-tab="deploy"]'),
+  panelPods: document.getElementById('panel-pods'),
+  panelDeploy: document.getElementById('panel-deploy'),
+  deployBanner: document.getElementById('deploy-banner'),
+  deployForm: document.getElementById('deploy-form'),
+  deployBuild: document.getElementById('deploy-build'),
+  deployBuildHint: document.getElementById('deploy-build-hint'),
+  deployEnv: document.getElementById('deploy-env'),
+  deployList: document.getElementById('deploy-targets'),
+  deployAdd: document.getElementById('deploy-add'),
+  deployAddBtn: document.getElementById('deploy-add-btn'),
+  deploySkip: document.getElementById('deploy-skip'),
+  deployVersion: document.getElementById('deploy-version'),
+  deployVersionField: document.getElementById('deploy-version-field'),
+  deployVersionHint: document.getElementById('deploy-version-hint'),
+  deployError: document.getElementById('deploy-error'),
+  deployPreview: document.getElementById('deploy-preview'),
+  deployRun: document.getElementById('deploy-run'),
+  deployRunView: document.getElementById('deploy-run-view'),
+  runStatus: document.getElementById('run-status'),
+  runTitle: document.getElementById('run-title'),
+  runElapsed: document.getElementById('run-elapsed'),
+  runCancel: document.getElementById('run-cancel'),
+  runBack: document.getElementById('run-back'),
+  runVersion: document.getElementById('run-version'),
+  runVersionValue: document.getElementById('run-version-value'),
+  runVersionNote: document.getElementById('run-version-note'),
+  runSteps: document.getElementById('run-steps'),
+  runNote: document.getElementById('run-note'),
+  runLog: document.getElementById('run-log'),
 };
 
 let services = [];
@@ -78,20 +118,33 @@ function setLoading(on) {
   el.groups.classList.toggle('busy', on);
 }
 
-function showBanner(message, detail, tone) {
-  el.banner.classList.remove('hidden');
-  el.banner.classList.toggle('ok', tone === 'ok');
-  el.banner.innerHTML = '';
+/**
+ * Paints a banner. Each top-level panel owns one — only the visible panel's
+ * banner can be read, so the node is a parameter rather than a fixed element.
+ *
+ * @param {HTMLElement} node
+ * @param {string} message
+ * @param {string} [detail] raw output, shown in a <pre>
+ * @param {string} [tone] 'ok' for a success banner
+ */
+function paintBanner(node, message, detail, tone) {
+  node.classList.remove('hidden');
+  node.classList.toggle('ok', tone === 'ok');
+  node.innerHTML = '';
 
   const text = document.createElement('div');
   text.textContent = message;
-  el.banner.appendChild(text);
+  node.appendChild(text);
 
   if (detail) {
     const pre = document.createElement('pre');
     pre.textContent = detail;
-    el.banner.appendChild(pre);
+    node.appendChild(pre);
   }
+}
+
+function showBanner(message, detail, tone) {
+  paintBanner(el.banner, message, detail, tone);
 }
 
 function hideBanner() {
@@ -191,6 +244,7 @@ function confirmAction(options) {
  * @param {Function} options.command values => the kubectl preview
  * @param {Function} [options.validate] values => error string, for rules that
  *   span more than one field
+ * @param {string} [options.tone] 'danger' to mark the confirm button destructive
  * @returns {Promise<Object|null>}
  */
 function formAction(options) {
@@ -200,6 +254,7 @@ function formAction(options) {
   el.formBody.textContent = options.body || '';
   el.formBody.classList.toggle('hidden', !options.body);
   el.formOk.textContent = options.confirmLabel;
+  el.formOk.classList.toggle('danger', options.tone === 'danger');
   el.formFields.innerHTML = '';
 
   const readValues = () => {
@@ -598,18 +653,17 @@ function defaultJobName(cronjob) {
 }
 
 /**
- * Creates a one-off Job from a CronJob. The CronJob list is fetched from the
- * cluster because pod.group is only a heuristic parent name.
+ * Reads the namespace's CronJobs, or resolves to null after showing the banner
+ * when the list cannot be read or is empty — better than opening a form whose
+ * only field would have nothing to choose from.
  *
- * @param {Object} pod
+ * @returns {Promise<Array<Object>|null>}
  */
-async function createJob(pod) {
+async function fetchCronjobs() {
   const params = new URLSearchParams({
     service: el.service.value,
     env: el.env.value,
   });
-
-  let cronjobs = [];
 
   try {
     const res = await fetch(`/api/cronjobs?${params}`);
@@ -619,14 +673,44 @@ async function createJob(pod) {
       throw new Error((body.error && body.error.message) || 'Request failed');
     }
 
-    cronjobs = body.cronjobs || [];
+    const cronjobs = body.cronjobs || [];
+
+    if (!cronjobs.length) {
+      showBanner('No CronJobs found in this namespace.');
+      return null;
+    }
+
+    return cronjobs;
   } catch (err) {
     showBanner(`Could not load CronJobs: ${err.message}`);
-    return;
+    return null;
   }
+}
 
-  if (!cronjobs.length) {
-    showBanner('No CronJobs found in this namespace.');
+/**
+ * Labels a CronJob option with the state the choice is made from: schedule plus
+ * whether it is currently running or suspended.
+ *
+ * @param {Object} cronjob
+ * @returns {string}
+ */
+function cronjobLabel(cronjob) {
+  return (
+    `${cronjob.name}${cronjob.schedule ? ` · ${cronjob.schedule}` : ''}` +
+    `${cronjob.suspend ? ' · suspended' : ' · active'}`
+  );
+}
+
+/**
+ * Creates a one-off Job from a CronJob. The CronJob list is fetched from the
+ * cluster because pod.group is only a heuristic parent name.
+ *
+ * @param {Object} pod
+ */
+async function createJob(pod) {
+  const cronjobs = await fetchCronjobs();
+
+  if (!cronjobs) {
     return;
   }
 
@@ -645,12 +729,7 @@ async function createJob(pod) {
         label: 'CronJob',
         type: 'select',
         value: match.name,
-        options: cronjobs.map((item) => ({
-          value: item.name,
-          label:
-            `${item.name}${item.schedule ? ` · ${item.schedule}` : ''}` +
-            `${item.suspend ? ' · suspended' : ''}`,
-        })),
+        options: cronjobs.map((item) => ({ value: item.name, label: cronjobLabel(item) })),
         onChange: (value, set, values) => {
           const next = defaultJobName(value);
 
@@ -693,6 +772,145 @@ async function createJob(pod) {
     await loadPods();
   } catch (err) {
     showBanner(`Create job failed: ${err.message}`);
+  }
+}
+
+/**
+ * Suspends the single Job the clicked pod belongs to. A pod only exists while
+ * its Job is running, so suspend is the only direction worth offering from a
+ * row; resuming is a CronJob-level action.
+ *
+ * @param {Object} pod
+ */
+async function stopJob(pod) {
+  const namespace = el.target.textContent.split(' · ')[0];
+  const ok = await confirmAction({
+    title: `Stop job ${pod.job}?`,
+    body:
+      `Suspends only this Job in ${namespace}. The CronJob's schedule is left ` +
+      `alone, so the next scheduled run still fires. The Job's running pods are ` +
+      `deleted, so work in progress is lost and starts again from the beginning ` +
+      `if the Job is ever resumed. This pod then disappears from the list — ` +
+      `resuming is done from “Enable / Disable + Stop Jobs…” → ` +
+      `“Active (resume)”, which needs some CronJob pod still on screen ` +
+      `to open the menu from.`,
+    command: `kubectl patch job ${pod.job} -p '{"spec":{"suspend":true}}'`,
+    confirmLabel: 'Stop job',
+  });
+
+  if (!ok) {
+    return;
+  }
+
+  try {
+    const body = await post('/api/job/suspend', {
+      service: el.service.value,
+      env: el.env.value,
+      job: pod.job,
+      suspend: true,
+    });
+
+    showBanner(body.message, null, 'ok');
+    await loadPods();
+  } catch (err) {
+    showBanner(`Stop job failed: ${err.message}`);
+  }
+}
+
+/**
+ * Suspends or resumes a CronJob's schedule. includeActiveJobs also patches the
+ * Jobs that are running right now, which is a separate menu item because
+ * suspending a running Job is destructive in a way suspending a schedule is not.
+ *
+ * @param {Object} pod
+ * @param {boolean} includeActiveJobs
+ */
+async function toggleSchedule(pod, includeActiveJobs) {
+  const cronjobs = await fetchCronjobs();
+
+  if (!cronjobs) {
+    return;
+  }
+
+  // pod.group is a heuristic parent name, so a miss is expected.
+  const match = cronjobs.find((item) => item.name === pod.group) || cronjobs[0];
+  // Preselect the change the user most likely came to make: the opposite of the
+  // CronJob's current state. The select holds strings, so the boolean is one.
+  const stateFor = (cronjob) => String(!cronjob.suspend);
+  const namespace = el.target.textContent.split(' · ')[0];
+  let suggested = stateFor(match);
+
+  const answer = await formAction({
+    title: includeActiveJobs ? 'Enable / Disable + Stop Jobs' : 'Enable / Disable Schedule',
+    body: includeActiveJobs
+      ? `Patches the CronJob in ${namespace} and every Job it has running right ` +
+        'now. Suspending a running Job deletes its live pods, so the work in ' +
+        'progress is lost and starts again from the beginning when it resumes.'
+      : `Patches only the CronJob's schedule in ${namespace}. Jobs that are ` +
+        'running now are left alone and finish normally; this affects future runs.',
+    confirmLabel: includeActiveJobs ? 'Apply and stop jobs' : 'Apply',
+    tone: includeActiveJobs ? 'danger' : null,
+    fields: [
+      {
+        key: 'cronjob',
+        label: 'CronJob',
+        type: 'select',
+        value: match.name,
+        options: cronjobs.map((item) => ({ value: item.name, label: cronjobLabel(item) })),
+        onChange: (value, set, values) => {
+          const picked = cronjobs.find((item) => item.name === value) || match;
+          const next = stateFor(picked);
+
+          // Only re-derive while the state is still the untouched suggestion, so
+          // a deliberate choice survives switching CronJob.
+          if (values.suspend === suggested) {
+            set('suspend', next);
+          }
+
+          suggested = next;
+        },
+      },
+      {
+        key: 'suspend',
+        label: 'State',
+        type: 'select',
+        value: suggested,
+        options: [
+          { value: 'false', label: 'Active (resume)' },
+          { value: 'true', label: 'Suspended (disable)' },
+        ],
+      },
+    ],
+    command: (values) => {
+      const patch =
+        `kubectl patch cronjob ${values.cronjob} -p '{"spec":{"suspend":${values.suspend}}}'`;
+
+      // The running Jobs are named by the server, so the second line stays
+      // generic rather than inventing names the user would try to read.
+      return includeActiveJobs
+        ? `${patch}\n# plus the same patch on each running job`
+        : patch;
+    },
+  });
+
+  if (!answer) {
+    return;
+  }
+
+  try {
+    const body = await post('/api/cronjob/suspend', {
+      service: el.service.value,
+      env: el.env.value,
+      cronjob: answer.cronjob,
+      // A select value is always a string; the endpoint wants a real boolean.
+      suspend: answer.suspend === 'true',
+      includeActiveJobs,
+    });
+
+    showBanner(body.steps.join(' · '), null, 'ok');
+    await loadPods();
+  } catch (err) {
+    showBanner(`Suspend failed: ${err.message}`);
   }
 }
 
@@ -788,6 +1006,29 @@ function podActions(pod, category) {
       label: 'Create Job…',
       hint: 'run a CronJob once, now',
       run: () => createJob(pod),
+    });
+
+    // The Job name comes from the pod's owner reference, which may be missing.
+    if (pod.job) {
+      actions.push({
+        label: 'Stop this job…',
+        hint: 'suspend the run this pod belongs to',
+        tone: 'danger',
+        run: () => stopJob(pod),
+      });
+    }
+
+    actions.push({
+      label: 'Enable / Disable Schedule…',
+      hint: 'suspend or resume future runs',
+      run: () => toggleSchedule(pod, false),
+    });
+
+    actions.push({
+      label: 'Enable / Disable + Stop Jobs…',
+      hint: 'also suspends jobs running now',
+      tone: 'danger',
+      run: () => toggleSchedule(pod, true),
     });
   }
 
@@ -1085,14 +1326,21 @@ function renderEnvs() {
   const service = services.find((item) => item.name === el.service.value);
 
   el.env.innerHTML = '';
+  el.deployEnv.innerHTML = '';
 
   (service ? service.envs : []).forEach((env) => {
-    const option = document.createElement('option');
+    [el.env, el.deployEnv].forEach((select) => {
+      const option = document.createElement('option');
 
-    option.value = env.name;
-    option.textContent = env.label;
-    el.env.appendChild(option);
+      option.value = env.name;
+      option.textContent = env.label;
+      select.appendChild(option);
+    });
   });
+
+  // The deploy form and the pod list share one target, so the two selects are
+  // two views of the same value rather than two independent choices.
+  el.deployEnv.value = el.env.value;
 }
 
 /* ---------- data ---------- */
@@ -1144,6 +1392,9 @@ async function loadPods() {
   } finally {
     inFlight = null;
     setLoading(false);
+    // The deploy form offers the deployments these pods belong to, so it is
+    // rebuilt whenever the pod list is.
+    refreshDeployTargets();
   }
 }
 
@@ -1170,7 +1421,11 @@ async function init() {
     });
 
     renderEnvs();
+    syncDeployBuild();
     await loadPods();
+    // A deploy outlives the page: if one is still running, show it instead of
+    // an empty form.
+    await reattachRunningJob();
   } catch (err) {
     el.status.textContent = 'backend unreachable';
     showBanner(`Could not load services: ${err.message}`);
@@ -1179,15 +1434,934 @@ async function init() {
 
 el.service.addEventListener('change', () => {
   renderEnvs();
+  syncDeployBuild();
   pods = [];
   loadPods();
 });
 el.env.addEventListener('change', () => {
+  el.deployEnv.value = el.env.value;
   pods = [];
   loadPods();
 });
 el.refresh.addEventListener('click', () => loadPods());
 el.filter.addEventListener('input', render);
 
+/* ---------- top-level tabs ---------- */
+
+// Exactly one panel is visible at a time. The toolbar sits above both.
+const PANELS = {
+  pods: el.panelPods,
+  deploy: el.panelDeploy,
+};
+
+let activeTab = 'pods';
+
+/**
+ * Swaps the top-level panel.
+ *
+ * Service and Environment stay visible on both tabs on purpose: the deploy form
+ * deploys to the service and env the pod list is pointed at, and a second pair
+ * of selects would be a second source of truth for "where am I acting?" — the
+ * failure mode being a deploy to an env the user is not looking at. Search and
+ * Refresh only act on the pod table, so they hide with it.
+ *
+ * @param {string} name 'pods' or 'deploy'
+ */
+function selectTab(name) {
+  if (!PANELS[name] || name === activeTab) {
+    return;
+  }
+
+  activeTab = name;
+
+  // The row menu is fixed-positioned on <body>, so it would otherwise hang over
+  // the panel that replaced the table it belongs to.
+  closeMenu();
+
+  Object.keys(PANELS).forEach((key) => {
+    PANELS[key].classList.toggle('hidden', key !== activeTab);
+  });
+
+  el.tabs.querySelectorAll('.tab').forEach((tab) => {
+    tab.classList.toggle('active', tab.dataset.tab === activeTab);
+  });
+
+  document.querySelectorAll('.toolbar .pods-only').forEach((node) => {
+    node.classList.toggle('hidden', activeTab !== 'pods');
+  });
+
+  if (activeTab === 'deploy') {
+    refreshDeployTargets();
+  }
+}
+
+/* ---------- stable deployment: form ---------- */
+
+// svctl is run from the repo checkout, which is how the team types it today.
+const SVCTL = 'cli/svctl jenkins run-pipeline';
+
+// kube-deploy's <cluster_context>. 'default' means "the service's own cluster".
+const DEPLOY_CLUSTER = 'default';
+
+// With no containerize step nothing produces a version, so the server demands
+// an explicit one. It deliberately refuses 'latest': during a fan-out that can
+// resolve to a teammate's build, which is the failure this whole screen exists
+// to prevent.
+//
+// Only the argv-safety rule is enforced here. The server also checks the token
+// shape against a pattern the config can override, so a stricter client check
+// would reject versions the server would have accepted.
+const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+// Output is capped so a chatty pipeline cannot grow the DOM without bound. The
+// head is dropped because the tail is the part being read.
+const LOG_MAX_LINES = 5000;
+
+const STATUS_TONE = {
+  pending: 'warn',
+  queued: 'warn',
+  running: 'warn',
+  skipped: 'warn',
+  succeeded: 'ok',
+  failed: 'bad',
+  cancelled: 'bad',
+};
+
+let deployTargets = [];
+let deployJob = null;
+let deployStream = null;
+let deployTicker = null;
+let stepTimeNodes = [];
+let logStep = -1;
+let buildSuggestion = '';
+
+function showDeployBanner(message, detail, tone) {
+  paintBanner(el.deployBanner, message, detail, tone);
+}
+
+function hideDeployBanner() {
+  el.deployBanner.classList.add('hidden');
+}
+
+function validDeployName(value) {
+  return DEPLOY_NAME_PATTERN.test(value) && value.length <= DEPLOY_NAME_MAX;
+}
+
+/**
+ * The name `containerize` runs with. It is not a deployment name — athena
+ * builds the image that athenaapp and the workers deploy — so it comes from the
+ * registry's `build` field, falling back to the service name for entries that
+ * do not declare one.
+ *
+ * @param {Object} service
+ * @returns {string}
+ */
+function serviceBuild(service) {
+  return (service && (service.build || service.name)) || '';
+}
+
+/**
+ * Prefills the build name from the selected service, but only while the field
+ * still holds the previous suggestion, so a hand-typed build survives switching
+ * service — the same rule the Job name follows.
+ */
+function syncDeployBuild() {
+  const service = services.find((item) => item.name === el.service.value);
+  const next = serviceBuild(service);
+  const current = el.deployBuild.value.trim();
+
+  if (!current || current === buildSuggestion) {
+    el.deployBuild.value = next;
+  }
+
+  buildSuggestion = next;
+  el.deployBuildHint.textContent = next
+    ? `containerize runs with “${next}” — not the deployment name.`
+    : 'The service name containerize runs with.';
+
+  syncDeployForm();
+}
+
+function selectedDeployments() {
+  return deployTargets.filter((target) => target.checked).map((target) => target.name);
+}
+
+/**
+ * Renders the exact commands the run will execute. Used for the live preview
+ * and, unchanged, for the confirm dialog.
+ *
+ * @returns {string}
+ */
+function deployCommands() {
+  const env = el.deployEnv.value || '<env>';
+  const build = el.deployBuild.value.trim() || '<build>';
+  const names = selectedDeployments();
+  const lines = [];
+
+  if (!el.deploySkip.checked) {
+    lines.push(`${SVCTL} containerize ${build} ${env}`);
+  }
+
+  // The point of the two-step run: every deployment gets the one version
+  // containerize resolved, rather than each resolving its own 'latest'.
+  const version = el.deploySkip.checked
+    ? el.deployVersion.value.trim() || '<version>'
+    : '<version from containerize>';
+
+  (names.length ? names : ['<deployment>']).forEach((name) => {
+    lines.push(`${SVCTL} kube-deploy ${DEPLOY_CLUSTER} ${name} ${env} ${version}`);
+  });
+
+  return lines.join('\n');
+}
+
+/**
+ * Validates the form the way the backend will.
+ *
+ * @returns {string|null} the first problem, or null when the form is runnable
+ */
+function deployProblem() {
+  const build = el.deployBuild.value.trim();
+
+  if (!build) {
+    return 'Build name is required.';
+  }
+
+  if (!validDeployName(build)) {
+    return `Build name must be ${NAME_SHAPE}`;
+  }
+
+  if (!el.deployEnv.value) {
+    return 'Pick an environment.';
+  }
+
+  if (el.deploySkip.checked) {
+    const version = el.deployVersion.value.trim();
+
+    if (!version) {
+      return 'Skipping containerize needs the image version to deploy.';
+    }
+
+    if (!VERSION_PATTERN.test(version)) {
+      return 'Image version must be alphanumeric with “.”, “-” or “_”.';
+    }
+  }
+
+  const names = selectedDeployments();
+
+  if (!names.length) {
+    return 'Pick at least one deployment.';
+  }
+
+  const bad = names.find((name) => !validDeployName(name));
+
+  return bad ? `“${bad}” is not a valid deployment name.` : null;
+}
+
+function syncDeployForm() {
+  const problem = deployProblem();
+  const env = el.deployEnv.value || 'stg';
+
+  el.deployVersionField.classList.toggle('hidden', !el.deploySkip.checked);
+  el.deployVersion.placeholder = `${env}-20260915T141826-cf2118ba`;
+  el.deployVersionHint.textContent =
+    `The image to roll out, as containerize printed it — usually ` +
+    `${env}-YYYYMMDDTHHMMSS-<sha>. “latest” is refused on purpose: in a ` +
+    `fan-out it can resolve to somebody else's build.`;
+
+  el.deployError.textContent = problem || '';
+  el.deployError.classList.toggle('hidden', !problem);
+  el.deployRun.disabled = Boolean(problem);
+  el.deployPreview.textContent = deployCommands();
+}
+
+/**
+ * Rebuilds the deployment list from the pods currently loaded, keeping both
+ * what the user ticked and the names they added by hand.
+ */
+function refreshDeployTargets() {
+  const checked = new Set(selectedDeployments());
+  const counts = new Map();
+
+  pods.forEach((pod) => {
+    if (pod.deployment) {
+      counts.set(pod.deployment, (counts.get(pod.deployment) || 0) + 1);
+    }
+  });
+
+  const next = Array.from(counts.keys())
+    .sort()
+    .map((name) => ({
+      name,
+      pods: counts.get(name),
+      manual: false,
+      checked: checked.has(name),
+    }));
+
+  // A deployment scaled to zero owns no pod to be discovered from, so a typed
+  // name has to survive every reload of the pod list.
+  deployTargets
+    .filter((target) => target.manual && !counts.has(target.name))
+    .forEach((target) => next.push(target));
+
+  deployTargets = next;
+  renderDeployTargets();
+  syncDeployForm();
+}
+
+function renderDeployTargets() {
+  el.deployList.innerHTML = '';
+
+  if (!deployTargets.length) {
+    const empty = document.createElement('div');
+
+    empty.className = 'target-empty';
+    empty.textContent =
+      'No deployments found for this service and environment — add one by name below.';
+    el.deployList.appendChild(empty);
+
+    return;
+  }
+
+  deployTargets.forEach((target) => {
+    const row = document.createElement('label');
+
+    row.className = target.checked ? 'target on' : 'target';
+
+    const box = document.createElement('input');
+
+    box.type = 'checkbox';
+    box.checked = target.checked;
+    box.addEventListener('change', () => {
+      target.checked = box.checked;
+      row.classList.toggle('on', box.checked);
+      syncDeployForm();
+    });
+
+    const name = document.createElement('span');
+
+    name.className = 'target-name';
+    name.textContent = target.name;
+
+    const note = document.createElement('span');
+
+    note.className = 'target-note';
+    note.textContent = target.manual
+      ? 'added by name'
+      : `${target.pods} pod${target.pods === 1 ? '' : 's'}`;
+
+    row.appendChild(box);
+    row.appendChild(name);
+    row.appendChild(note);
+
+    if (target.manual) {
+      const remove = document.createElement('button');
+
+      remove.type = 'button';
+      remove.className = 'target-remove';
+      remove.textContent = '✕';
+      remove.setAttribute('aria-label', `Remove ${target.name}`);
+      remove.addEventListener('click', (event) => {
+        // The row is a <label>, so a click inside it would toggle the checkbox.
+        event.preventDefault();
+        event.stopPropagation();
+
+        deployTargets = deployTargets.filter((item) => item !== target);
+        renderDeployTargets();
+        syncDeployForm();
+      });
+
+      row.appendChild(remove);
+    }
+
+    el.deployList.appendChild(row);
+  });
+}
+
+/**
+ * Adds a deployment the pod list cannot know about — typically one scaled to
+ * zero, which is exactly the case discovery misses.
+ */
+function addDeployTarget() {
+  const name = el.deployAdd.value.trim();
+
+  if (!name) {
+    return;
+  }
+
+  if (!validDeployName(name)) {
+    showDeployBanner(`“${name}” is not a valid deployment name. It must be ${NAME_SHAPE}`);
+    return;
+  }
+
+  const existing = deployTargets.find((target) => target.name === name);
+
+  if (existing) {
+    existing.checked = true;
+  } else {
+    deployTargets.push({ name, pods: 0, manual: true, checked: true });
+  }
+
+  el.deployAdd.value = '';
+  hideDeployBanner();
+  renderDeployTargets();
+  syncDeployForm();
+}
+
+/* ---------- stable deployment: running ---------- */
+
+function showDeployForm() {
+  el.deployForm.classList.remove('hidden');
+  el.deployRunView.classList.add('hidden');
+}
+
+function showDeployRun() {
+  el.deployForm.classList.add('hidden');
+  el.deployRunView.classList.remove('hidden');
+}
+
+function setRunNote(text) {
+  el.runNote.textContent = text;
+}
+
+function clearRunLog() {
+  el.runLog.innerHTML = '';
+  logStep = -1;
+}
+
+function stepLabel(index) {
+  const step = deployJob && deployJob.steps ? deployJob.steps[index] : null;
+
+  return step && step.name ? step.name : `step ${Number(index) + 1}`;
+}
+
+/**
+ * Appends one line of raw process output. Auto-scroll happens only when the
+ * user is already at the bottom, so scrolling up to read is never undone.
+ *
+ * @param {number} stepIndex
+ * @param {string} text
+ */
+function appendLogLine(stepIndex, text) {
+  const pane = el.runLog;
+  // Measured before the append: afterwards the pane is taller and everybody
+  // looks like they have scrolled up.
+  const following = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
+
+  if (stepIndex !== logStep) {
+    const separator = document.createElement('div');
+
+    separator.className = 'log-sep';
+    separator.textContent = `── ${stepLabel(stepIndex)} ──`;
+    pane.appendChild(separator);
+    logStep = stepIndex;
+  }
+
+  const line = document.createElement('div');
+
+  line.className = 'log-line';
+  // Raw process output: textContent, never markup.
+  line.textContent = text;
+  pane.appendChild(line);
+
+  while (pane.childElementCount > LOG_MAX_LINES && pane.firstChild) {
+    pane.removeChild(pane.firstChild);
+  }
+
+  if (following) {
+    pane.scrollTop = pane.scrollHeight;
+  }
+}
+
+/**
+ * Formats a duration. Timestamps arrive as ISO strings; a missing end means the
+ * thing is still running, which is the live case.
+ *
+ * @param {string} from
+ * @param {string} [to]
+ * @returns {string}
+ */
+function elapsedText(from, to) {
+  const start = Date.parse(from);
+
+  if (!Number.isFinite(start)) {
+    return '';
+  }
+
+  const end = to ? Date.parse(to) : Date.now();
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function stepTime(step) {
+  return step.startedAt ? elapsedText(step.startedAt, step.finishedAt) : '';
+}
+
+/**
+ * Ticks the clocks only. The step rows themselves are left alone so a
+ * once-a-second repaint cannot fight with the log pane or the user's selection.
+ */
+function renderRunTimes() {
+  if (!deployJob) {
+    return;
+  }
+
+  el.runElapsed.textContent = elapsedText(deployJob.createdAt, deployJob.finishedAt);
+  stepTimeNodes.forEach((entry) => {
+    entry.node.textContent = stepTime(entry.step);
+  });
+}
+
+function renderRunSteps() {
+  el.runSteps.innerHTML = '';
+  stepTimeNodes = [];
+
+  (deployJob.steps || []).forEach((step) => {
+    // Steps arrive addressed by index, so a gap is possible before the server
+    // has described them all.
+    if (!step) {
+      return;
+    }
+
+    const status = step.status || 'pending';
+    const row = document.createElement('div');
+
+    row.className = `step ${status}`;
+
+    const head = document.createElement('div');
+
+    head.className = 'step-head';
+
+    const name = document.createElement('span');
+
+    name.className = 'step-name';
+    name.textContent = step.name || 'step';
+    head.appendChild(name);
+    head.appendChild(pill(status, STATUS_TONE[status] || 'warn'));
+
+    const time = document.createElement('span');
+
+    time.className = 'step-time';
+    time.textContent = stepTime(step);
+    head.appendChild(time);
+    stepTimeNodes.push({ node: time, step });
+
+    if (step.jenkinsUrl) {
+      const link = document.createElement('a');
+
+      link.className = 'step-link';
+      link.href = step.jenkinsUrl;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = 'Jenkins ↗';
+      head.appendChild(link);
+    }
+
+    if (Number.isInteger(step.exitCode) && step.exitCode !== 0) {
+      const code = document.createElement('span');
+
+      code.className = 'step-exit';
+      code.textContent = `exit ${step.exitCode}`;
+      head.appendChild(code);
+    }
+
+    if (step.droppedLines) {
+      const dropped = document.createElement('span');
+
+      // Nobody should read a truncated log as a complete one.
+      dropped.className = 'step-exit';
+      dropped.textContent = `${step.droppedLines} earlier lines dropped`;
+      head.appendChild(dropped);
+    }
+
+    const command = document.createElement('div');
+
+    command.className = 'step-cmd';
+    // The argv the server actually spawned — the authoritative version of the
+    // preview shown on the form. A kube-deploy step has none until containerize
+    // has produced the version that goes in it.
+    command.textContent = step.command
+      ? step.command.join(' ')
+      : 'argv is completed once containerize resolves the image version';
+
+    row.appendChild(head);
+    row.appendChild(command);
+    el.runSteps.appendChild(row);
+  });
+}
+
+function renderRun() {
+  if (!deployJob) {
+    return;
+  }
+
+  const running = deployJob.status === 'running';
+  const names = deployJob.deployments || [];
+
+  el.runStatus.innerHTML = '';
+  el.runStatus.appendChild(pill(deployJob.status, STATUS_TONE[deployJob.status] || 'warn'));
+
+  el.runTitle.textContent =
+    `${deployJob.build || el.deployBuild.value.trim()} → ${names.join(', ')}` +
+    `${deployJob.env ? ` · ${deployJob.env}` : ''}`;
+
+  el.runCancel.classList.toggle('hidden', !running);
+  el.runBack.classList.toggle('hidden', running);
+  // A run outlives the tab it was started from, so the tab itself carries the
+  // "something is happening" marker.
+  el.tabDeploy.classList.toggle('running', running);
+
+  // The resolved version is the proof that every deployment got one image.
+  el.runVersion.classList.toggle('hidden', !deployJob.version);
+
+  if (deployJob.version) {
+    el.runVersionValue.textContent = deployJob.version;
+    el.runVersionNote.textContent =
+      `the one image all ${names.length} deployment${names.length === 1 ? '' : 's'} receive`;
+  }
+
+  renderRunSteps();
+  renderRunTimes();
+
+  // The server explains a failure in one sentence — a half-finished fan-out is
+  // not something to leave the user to infer from exit codes.
+  if (deployJob.error) {
+    showDeployBanner(deployJob.error);
+  }
+
+  if (running && !deployTicker) {
+    deployTicker = setInterval(renderRunTimes, 1000);
+  } else if (!running && deployTicker) {
+    clearInterval(deployTicker);
+    deployTicker = null;
+  }
+}
+
+/**
+ * Parses an SSE payload, tolerating a malformed frame rather than letting one
+ * bad event kill the listener.
+ *
+ * @param {MessageEvent} event
+ * @returns {Object|null}
+ */
+function parseEvent(event) {
+  try {
+    return JSON.parse(event.data);
+  } catch (err) {
+    return null;
+  }
+}
+
+function closeDeployStream() {
+  if (deployStream) {
+    deployStream.close();
+    deployStream = null;
+  }
+}
+
+/**
+ * Re-reads the job once the stream ends, so the final status, version and exit
+ * codes are what the server recorded rather than the last event that arrived.
+ */
+async function refreshDeployJob() {
+  if (!deployJob) {
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(deployJob.id)}`);
+    const body = await res.json();
+
+    if (res.ok && body.job) {
+      deployJob = body.job;
+    }
+  } catch (err) {
+    // Keep whatever the stream gave us.
+  }
+
+  renderRun();
+}
+
+/**
+ * Opens the SSE stream for a job. The server replays its whole line buffer on
+ * every connect — including the reconnect EventSource makes on its own after a
+ * dropped connection — so the pane is cleared on 'open' instead of ending up
+ * with a second copy of the run.
+ *
+ * @param {string} id
+ */
+function openDeployStream(id) {
+  closeDeployStream();
+
+  const source = new EventSource(`/api/jobs/${encodeURIComponent(id)}/stream`);
+
+  deployStream = source;
+
+  source.addEventListener('open', () => {
+    setRunNote('');
+    clearRunLog();
+  });
+
+  source.addEventListener('line', (event) => {
+    const data = parseEvent(event);
+
+    if (data) {
+      appendLogLine(data.stepIndex, data.text);
+    }
+  });
+
+  source.addEventListener('step', (event) => {
+    const data = parseEvent(event);
+
+    if (data && deployJob) {
+      deployJob.steps = deployJob.steps || [];
+      deployJob.steps[data.stepIndex] = data.step;
+      renderRun();
+    }
+  });
+
+  source.addEventListener('job', (event) => {
+    const data = parseEvent(event);
+
+    if (data && data.job) {
+      deployJob = data.job;
+      renderRun();
+    }
+  });
+
+  source.addEventListener('end', () => {
+    // The run is over; closing stops EventSource from reconnecting and
+    // replaying the whole log again.
+    closeDeployStream();
+    refreshDeployJob();
+  });
+
+  source.addEventListener('error', () => {
+    // EventSource retries by itself, so only a closed source is terminal.
+    if (source.readyState === EventSource.CLOSED) {
+      deployStream = null;
+      setRunNote('Stream closed — reload to reattach.');
+    } else {
+      setRunNote('Reconnecting…');
+    }
+  });
+}
+
+/**
+ * Shows the run view for a job and starts streaming it. The job is fetched
+ * first so the steps are on screen before the first event arrives — unless the
+ * caller already has it, which POST /api/deploy returns.
+ *
+ * @param {string} id
+ * @param {Object} [known] the job, when the caller already has it
+ */
+async function attachDeployJob(id, known) {
+  deployJob = known || { id, status: 'running', steps: [], deployments: [], version: null };
+
+  if (!known) {
+    try {
+      const res = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
+      const body = await res.json();
+
+      if (res.ok && body.job) {
+        deployJob = body.job;
+      }
+    } catch (err) {
+      // The stream carries the same metadata; a failed prefetch is not fatal.
+    }
+  }
+
+  clearRunLog();
+  hideDeployBanner();
+  showDeployRun();
+  renderRun();
+  openDeployStream(id);
+}
+
+/**
+ * Reattaches to a run that is still going — after a page reload, or after the
+ * 409 that says the server is busy with a deployment someone else started.
+ *
+ * @returns {Promise<boolean>} whether a running job was found
+ */
+async function reattachRunningJob() {
+  try {
+    const res = await fetch('/api/jobs');
+    const body = await res.json();
+
+    if (!res.ok) {
+      return false;
+    }
+
+    const running = (body.jobs || []).find((job) => job.status === 'running');
+
+    if (!running) {
+      return false;
+    }
+
+    await attachDeployJob(running.id);
+
+    return true;
+  } catch (err) {
+    // The deploy endpoints may be unreachable; the rest of the page still works.
+    return false;
+  }
+}
+
+/**
+ * Drops the finished run and returns to the form. Only reachable once the job
+ * has stopped, so nothing is being abandoned mid-flight.
+ */
+function resetDeploy() {
+  closeDeployStream();
+
+  if (deployTicker) {
+    clearInterval(deployTicker);
+    deployTicker = null;
+  }
+
+  deployJob = null;
+  stepTimeNodes = [];
+  el.runSteps.innerHTML = '';
+  el.tabDeploy.classList.remove('running');
+  clearRunLog();
+  setRunNote('');
+  showDeployForm();
+  refreshDeployTargets();
+}
+
+/**
+ * Confirms, then starts the run. This deploys to a real cluster and takes
+ * minutes, so the confirm shows the full command list rather than a summary.
+ */
+async function startDeploy() {
+  if (deployProblem()) {
+    return;
+  }
+
+  const names = selectedDeployments();
+  const env = el.deployEnv.value;
+  const skip = el.deploySkip.checked;
+  const build = el.deployBuild.value.trim();
+  const namespace = el.target.textContent.split(' · ')[0] || env;
+  const total = names.length + (skip ? 0 : 1);
+
+  const ok = await confirmAction({
+    title: `Deploy to ${env}?`,
+    body:
+      `This runs ${total} Jenkins pipeline${total === 1 ? '' : 's'} for real. ` +
+      (skip
+        ? `Containerize is skipped: every deployment is rolled to the image ` +
+          `${el.deployVersion.value.trim()}. `
+        : `Containerize builds ${build} first, then every deployment gets that one version. `) +
+      `${names.length} deployment${names.length === 1 ? '' : 's'} in ${namespace} ` +
+      `(${names.join(', ')}) will be rolled. This takes minutes and cannot be undone from here.`,
+    command: deployCommands(),
+    confirmLabel: 'Run deployment',
+  });
+
+  if (!ok) {
+    return;
+  }
+
+  const payload = {
+    service: el.service.value,
+    env,
+    build,
+    deployments: names,
+  };
+
+  if (skip) {
+    payload.skipContainerize = true;
+    // The server requires this when containerize is skipped; there is nothing
+    // else that could produce a version.
+    payload.version = el.deployVersion.value.trim();
+  }
+
+  el.deployRun.disabled = true;
+
+  try {
+    const body = await post('/api/deploy', payload);
+
+    hideDeployBanner();
+    await attachDeployJob(body.id, body.job);
+  } catch (err) {
+    showDeployBanner(`Could not start the deployment: ${err.message}`);
+    syncDeployForm();
+
+    // A 409 means a run is already in flight; showing that run is more useful
+    // than the error on its own.
+    await reattachRunningJob();
+  }
+}
+
+/**
+ * Cancels the live run. Half a fan-out is a real state to land in, so this
+ * confirms and says so.
+ */
+async function cancelDeploy() {
+  if (!deployJob) {
+    return;
+  }
+
+  const ok = await confirmAction({
+    title: 'Cancel this run?',
+    body:
+      'Stops the pipeline that is running now. Deployments that already ' +
+      'finished stay on the new image, so the service can be left half ' +
+      'deployed — the rest then have to be deployed by hand, or by running ' +
+      'this again with “Skip containerize”.',
+    command: `POST /api/jobs/${deployJob.id}/cancel`,
+    confirmLabel: 'Cancel run',
+  });
+
+  if (!ok) {
+    return;
+  }
+
+  try {
+    await post(`/api/jobs/${encodeURIComponent(deployJob.id)}/cancel`, {});
+  } catch (err) {
+    showDeployBanner(`Cancel failed: ${err.message}`);
+  }
+}
+
+el.tabs.addEventListener('click', (event) => {
+  const tab = event.target.closest('.tab');
+
+  if (tab && tab.dataset.tab) {
+    selectTab(tab.dataset.tab);
+  }
+});
+
+el.deployEnv.addEventListener('change', () => {
+  if (el.deployEnv.value === el.env.value) {
+    return;
+  }
+
+  // One target for the whole app: the toolbar follows the form, and reloading
+  // the pods reloads the deployment list this form offers.
+  el.env.value = el.deployEnv.value;
+  pods = [];
+  loadPods();
+  syncDeployForm();
+});
+el.deployBuild.addEventListener('input', syncDeployForm);
+el.deploySkip.addEventListener('change', syncDeployForm);
+el.deployVersion.addEventListener('input', syncDeployForm);
+el.deployAddBtn.addEventListener('click', addDeployTarget);
+el.deployAdd.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    addDeployTarget();
+  }
+});
+el.deployRun.addEventListener('click', startDeploy);
+el.runCancel.addEventListener('click', cancelDeploy);
+el.runBack.addEventListener('click', resetDeploy);
+
 buildSubtabs();
+// Paint the deploy form before any data arrives, so the tab is never blank.
+refreshDeployTargets();
 init();

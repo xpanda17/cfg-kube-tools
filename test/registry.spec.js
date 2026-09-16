@@ -20,6 +20,8 @@ const VALID = `
 services:
   - name: athenaapp
     label: Athena App
+    repo: athena
+    build: athena
     envs:
       - name: stg
         label: Staging
@@ -87,6 +89,49 @@ services:
       expect(registry.resolve(loaded, 'athenaapp', 'prod').timeoutSeconds).to.equal(120);
     });
 
+    it('accepts a service with no repo or build', () => {
+      const file = writeRegistry(`
+services:
+  - name: plain
+    envs:
+      - name: stg
+        context: c
+        namespace: n
+`);
+      const loaded = registry.load(file);
+
+      expect(registry.resolve(loaded, 'plain', 'stg').repo).to.equal(null);
+      expect(registry.resolve(loaded, 'plain', 'stg').build).to.equal(null);
+    });
+
+    it('rejects a repo that could be read as a flag', () => {
+      const file = writeRegistry(`
+services:
+  - name: evil
+    repo: --commit
+    envs:
+      - name: stg
+        context: c
+        namespace: n
+`);
+
+      expect(() => registry.load(file)).to.throw(/invalid repo/);
+    });
+
+    it('rejects a build that could be read as a flag', () => {
+      const file = writeRegistry(`
+services:
+  - name: evil
+    build: ../../etc
+    envs:
+      - name: stg
+        context: c
+        namespace: n
+`);
+
+      expect(() => registry.load(file)).to.throw(/invalid build/);
+    });
+
     it('rejects a timeout that is not a sane number', () => {
       const file = writeRegistry(`
 timeoutSeconds: 9000
@@ -110,7 +155,20 @@ services:
         context: 'c',
         namespace: 'n',
         timeoutSeconds: registry.DEFAULT_TIMEOUT_SECONDS,
+        service: 'a',
+        env: 'stg',
+        repo: null,
+        build: null,
       });
+    });
+
+    it('surfaces the pipeline repo and build on the target', () => {
+      const target = registry.resolve(registry.load(writeRegistry(VALID)), 'athenaapp', 'stg');
+
+      expect(target.repo).to.equal('athena');
+      expect(target.build).to.equal('athena');
+      expect(target.service).to.equal('athenaapp');
+      expect(target.env).to.equal('stg');
     });
 
     it('rejects an unknown service with a 400', () => {
@@ -123,11 +181,19 @@ services:
   });
 
   describe('toMenu', () => {
+    it('exposes repo and build so the UI can prefill the deploy form', () => {
+      const menu = registry.toMenu(registry.load(writeRegistry(VALID)));
+
+      expect(menu[0].repo).to.equal('athena');
+      expect(menu[0].build).to.equal('athena');
+    });
+
     it('hides context and namespace from the UI payload', () => {
       const menu = registry.toMenu(registry.load(writeRegistry(VALID)));
 
       expect(menu[0].label).to.equal('Athena App');
       expect(menu[0].envs[0]).to.deep.equal({ name: 'stg', label: 'Staging' });
+      expect(menu[0]).to.not.have.property('timeoutSeconds');
     });
   });
 });

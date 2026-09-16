@@ -67,6 +67,50 @@ kubectl config view --minify -o jsonpath='{..namespace}'
 The file is re-read on every request, so new entries show up on refresh — no
 restart needed.
 
+## Running pipelines (deploys)
+
+Deploys shell out to `svctl`, which lives inside your own repo checkout, so the
+app needs to know where that is. That path is machine-specific, so it lives in a
+gitignored file you create once:
+
+```bash
+cp .kube-tools.example.yaml .kube-tools.yaml
+$EDITOR .kube-tools.yaml          # set workspaceRoot
+```
+
+```yaml
+workspaceRoot: ~/Desktop/cermati   # PARENT of the repo holding cli/svctl
+versionPattern: null               # optional override, see the example file
+```
+
+There is no default — svctl misbehaves when it is run from the wrong working
+directory, so the app refuses to guess and fails with the path it tried.
+
+Each service then names its repo and its build target in `services.yaml`:
+
+```yaml
+  - name: athenaapp
+    repo: athena        # <workspaceRoot>/athena — holds cli/svctl, used as cwd
+    build: athena       # what `containerize` is run with (NOT a deployment name)
+```
+
+`POST /api/deploy` runs **one** containerize, scrapes the image version out of
+its output, and then runs `kube-deploy` for each deployment you listed, in
+order, with that same version:
+
+```
+cli/svctl jenkins run-pipeline containerize <build> <env>
+cli/svctl jenkins run-pipeline kube-deploy default <deployment> <env> <version>
+```
+
+Chaining with `latest` instead would let a teammate's build land on half your
+workers, so the version is captured and reused. If no version can be found in
+the containerize output, the run **stops** — it never falls back to `latest`.
+
+One run at a time (a second request gets `409`), the output is streamed over SSE
+from `GET /api/jobs/:id/stream`, and the run lives on the server: closing the tab
+or reloading replays everything captured so far and keeps tailing.
+
 ## Run permanently in the background
 
 Pick one. All three survive reboot and restart the app if it crashes.
@@ -163,6 +207,13 @@ Then `pm2 logs kube-tools`, `pm2 restart kube-tools`, `pm2 delete kube-tools`.
 | `POST` | `/api/scale`                    | Set Replica; pins a KEDA ScaledObject first. |
 | `POST` | `/api/spec`                     | Update Spec: CPU/memory requests + limits.   |
 | `POST` | `/api/job`                      | Create Job from a CronJob, run once now. |
+| `POST` | `/api/cronjob/suspend`          | Suspend/resume a CronJob, optionally its running Jobs. |
+| `POST` | `/api/job/suspend`              | Suspend/resume one Job, leaving the schedule alone. |
+| `POST` | `/api/deploy`                   | Start a run: containerize once, then fan out `kube-deploy`. `202 {id}`, `409` if one is already running. |
+| `GET`  | `/api/jobs`                     | Recent runs, newest first, without the log buffers. |
+| `GET`  | `/api/jobs/:id`                 | One run with its per-step status and Jenkins URLs. |
+| `GET`  | `/api/jobs/:id/stream`          | SSE: replays the buffered output, then live-tails. Events: `line`, `step`, `job`, `end`. |
+| `POST` | `/api/jobs/:id/cancel`          | SIGTERM the running step (SIGKILL after 5s).  |
 
 Cluster failures come back as `502` with a classified error — `auth`,
 `network`, `rbac`, `no-context`, `timeout` — so the UI can say "check your VPN"
@@ -176,12 +227,18 @@ instead of dumping a stack trace.
 - Registry values are validated so a stray `--token=...` cannot become a flag.
 - CPU/memory quantities are pattern-matched on both ends, so a value can never
   start with `-` and be read by kubectl as a flag.
+- Deploy input is validated before anything spawns: deployment and build names
+  must be DNS-1123 labels, at most 20 deployments per run, and the env comes
+  from the registry rather than the request body.
+- The image version is scraped from a log, so it is re-checked against the
+  version pattern before it becomes an argument — even though we produced it.
 - No credential handling — auth is delegated to your existing CLIs.
 
 ## Roadmap
 
 - [x] Server, UI shell, health check
 - [x] Service/env selector + pod listing
+- [x] Job engine + SSE: containerize → fan-out `kube-deploy`
 - [ ] Pod actions: logs (streamed), describe, delete, exec
 - [ ] `kube-tools install` — one command to set up the background service
 

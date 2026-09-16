@@ -37,6 +37,10 @@ bin/cli.js        entrypoint, --port flag
 lib/server.js     express app; createApp() split from start() for tests
 lib/routes/       one file per endpoint, each exporting a Router; index.js
                   collects them and server.js mounts the set under /api
+lib/config.js     machine-local config (.kube-tools.yaml): workspaceRoot +
+                  optional versionPattern. Gitignored, no default — see §7.4
+lib/jobs.js       the `stream` kind: spawn + step sequencing + line buffers +
+                  version capture; one run at a time, process-wide
 lib/registry.js   app config: loads/validates services.yaml, resolves
                   (service,env)→target, plus resolveTarget(req,res) for the
                   route handlers. Sits at the root, not in core/ — it is this
@@ -49,18 +53,39 @@ lib/k8s/          the kubernetes work itself:
   pods.js         pure transform: ready counts, restarts, kubectl-style age, status
   portforward.js  spawns/tracks port-forward child processes
 public/           index.html + style.css + app.js (vanilla, no framework)
-test/             mocha + chai + proxyquire — 28 specs passing
+test/             mocha + chai + proxyquire — 190 specs passing
 services.yaml     hand-written registry (to be replaced, see §5)
 ```
 
 Endpoints (one file each under `lib/routes/`): `GET /api/health`,
 `GET /api/services`, `GET /api/pods?service=&env=`, `GET /api/cronjobs`,
 `POST /api/restart`, `POST /api/scale`, `POST /api/spec`, `POST /api/job`,
-`GET|POST /api/portforward`, `POST /api/portforward/stop`.
+`POST /api/cronjob/suspend`, `POST /api/job/suspend`,
+`GET|POST /api/portforward`, `POST /api/portforward/stop`,
+`POST /api/deploy`, `GET /api/jobs`, `GET /api/jobs/:id`,
+`GET /api/jobs/:id/stream` (SSE), `POST /api/jobs/:id/cancel`.
 
 Row actions are built by `podActions()` in `public/app.js`, which returns the
 list a pod supports; the `⋯` trigger is only rendered when that list is
 non-empty, so a visible control is never a no-op.
+
+Suspending a CronJob is split in two because the blast radius differs: patching
+`cronjob.spec.suspend` only stops FUTURE runs, while also patching each running
+Job's `spec.suspend` deletes those Jobs' live pods, so work in progress is lost
+and restarts from the beginning on resume. Both directions use `suspend` rather
+than deleting Jobs, so the action is reversible. Finished Jobs are never
+touched, and resume only un-suspends Jobs that are actually suspended.
+
+A pod row carries `job` (its owning Job) taken from `ownerReferences`, never
+parsed out of the pod name: `<job>-<suffix>` is only a convention, and an
+indexed Job inserts another segment, so `indexed-job-3-xy12z` would yield the
+non-existent `indexed-job-3`. This backs the per-pod "Stop this job" action,
+which suspends one Job without touching the schedule.
+
+Known gap: these actions hang off pod rows, but suspending deletes the pods, so
+once a CronJob's tab empties there is no row left to open the menu from and
+resume becomes unreachable. Backing the CronJobs tab with `/api/cronjobs`
+instead of pods is the fix.
 
 Implemented: service/env dropdowns, pod table, client-side filter, loading
 indicator, error banner with classified messages. Auto-refresh was built and
@@ -284,6 +309,23 @@ two-step UI (run containerize, show URL, user confirms version, then fan out).
 Start with the two-step UI: it mirrors today's manual flow minus the terminal,
 and automates the N-worker fan-out.
 
+**Resolved, in `lib/jobs.js`:** the version is scraped out of the containerize
+step's own captured output by TOKEN SHAPE, not by the wording around it —
+`` new RegExp(`\b${env}-\d{8}T\d{6}-[0-9a-f]{7,40}\b`, 'g') ``, LAST match
+wins (`stg-20260915T141826-cf2118ba`). `.kube-tools.yaml`'s `versionPattern`
+overrides it if the build ever changes shape.
+
+If no version is found the run **fails right there** and no `kube-deploy` is
+spawned. There is deliberately no fallback to `latest`: shipping the wrong image
+to N workers is worse than stopping, and `latest` is exactly what the fan-out
+was supposed to stop depending on. The captured token is re-validated against
+the same pattern before it becomes an argv entry — we produced it, but it came
+out of a log, so it is treated as untrusted.
+
+The two-step UI still has a place: `POST /api/deploy` accepts
+`{ skipContainerize: true, version }` to fan out a version that already exists.
+That version has to pass the same shape check; `latest` is rejected.
+
 ### 7.5 Security
 
 Input validation is the security boundary, and it is real, not decorative:
@@ -310,6 +352,7 @@ Input validation is the security boundary, and it is real, not decorative:
 | --- | --- | --- |
 | **P1** | parse `.services.d` as config source; pods with type + resources + version label; rollout restart; scale via patch; kube-proxy DNS links; copy-buttons for psql/vault | none |
 | **P2** | job engine + SSE; containerize → fan-out deploy; canary commands | job store |
+| | ✅ done except canary: `lib/jobs.js` + `/api/deploy` + `/api/jobs/*` | |
 | **P3** | port-forward lifecycle; log streaming | process registry |
 
 P1 delivers most of the cheat-sheet with no architectural risk. P2 is the real

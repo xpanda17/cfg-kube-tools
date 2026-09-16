@@ -156,6 +156,46 @@ describe('pods', () => {
     });
   });
 
+  describe('jobName', () => {
+    it('names the owning Job', () => {
+      const pod = {
+        metadata: {
+          name: 'atwcron-reminder-29823960-mj28x',
+          ownerReferences: [{ kind: 'Job', name: 'atwcron-reminder-29823960' }],
+        },
+      };
+
+      expect(pods.jobName(pod)).to.equal('atwcron-reminder-29823960');
+    });
+
+    it('reads the owner rather than splitting the pod name', () => {
+      // An indexed Job adds a segment, so the pod name cannot be split reliably.
+      const pod = {
+        metadata: {
+          name: 'atwcron-reminder-29823960-3-mj28x',
+          ownerReferences: [{ kind: 'Job', name: 'atwcron-reminder-29823960' }],
+        },
+      };
+
+      expect(pods.jobName(pod)).to.equal('atwcron-reminder-29823960');
+    });
+
+    it('returns null for a ReplicaSet-owned pod', () => {
+      const pod = {
+        metadata: {
+          name: 'athenaapp-deployment-596db77f5c-7wgrm',
+          ownerReferences: [{ kind: 'ReplicaSet', name: 'athenaapp-deployment-596db77f5c' }],
+        },
+      };
+
+      expect(pods.jobName(pod)).to.equal(null);
+    });
+
+    it('returns null for a pod that nothing owns', () => {
+      expect(pods.jobName({ metadata: { name: 'hand-rolled-pod' } })).to.equal(null);
+    });
+  });
+
   describe('toRows', () => {
     const payload = {
       items: [
@@ -293,6 +333,47 @@ describe('pods', () => {
       const rows = pods.toRows(payload, Date.now());
 
       expect(rows[0].containers).to.deep.equal([]);
+    });
+
+    it('exposes the owning Job so the UI can offer to stop it', () => {
+      const rows = pods.toRows({
+        items: [{
+          metadata: {
+            name: 'atwcron-reminder-29823960-mj28x',
+            labels: {},
+            creationTimestamp: new Date().toISOString(),
+            ownerReferences: [{ kind: 'Job', name: 'atwcron-reminder-29823960' }],
+          },
+          spec: { containers: [] },
+          status: { phase: 'Running', containerStatuses: [] },
+        }],
+      });
+
+      expect(rows[0].job).to.equal('atwcron-reminder-29823960');
+      expect(rows[0].deployment).to.equal(null);
+    });
+
+    it('leaves job null for a deployment pod', () => {
+      const rows = pods.toRows({
+        items: [{
+          metadata: {
+            name: 'athenaapp-deployment-596db77f5c-7wgrm',
+            labels: { 'pod-template-hash': '596db77f5c' },
+            creationTimestamp: new Date().toISOString(),
+            ownerReferences: [{ kind: 'ReplicaSet', name: 'athenaapp-deployment-596db77f5c' }],
+          },
+          spec: { containers: [] },
+          status: { phase: 'Running', containerStatuses: [] },
+        }],
+      });
+
+      expect(rows[0].job).to.equal(null);
+    });
+
+    it('leaves job null for a pod that nothing owns', () => {
+      const rows = pods.toRows(payload, Date.now());
+
+      expect(rows[0].job).to.equal(null);
     });
 
     it('no longer exposes the node name', () => {

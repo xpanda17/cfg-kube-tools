@@ -679,3 +679,432 @@ a:focus-visible {
   color: #ffb4ae;
   font-size: 12px;
 }
+
+/* ---------- top-level panels ---------- */
+
+.panel.hidden {
+  display: none;
+}
+
+/* button.primary sets its own display, which outranks a bare .hidden. */
+.toolbar .pods-only.hidden {
+  display: none;
+}
+
+/* A run outlives the tab it was started from, so the tab shows it is live. */
+.tab.running::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  vertical-align: middle;
+}
+
+/* ---------- deploy form ---------- */
+
+.card {
+  max-width: 820px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.card h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.lede {
+  margin: 0 0 18px;
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.deploy-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+#panel-deploy .field {
+  margin-bottom: 18px;
+}
+
+#panel-deploy .deploy-grid .field {
+  margin-bottom: 0;
+}
+
+#panel-deploy input[type="text"] {
+  height: 34px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+#panel-deploy input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(68, 147, 248, 0.15);
+}
+
+.hint {
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.45;
+  max-width: 62ch;
+}
+
+.error {
+  margin: 0 0 12px;
+  color: #ffb4ae;
+  font-size: 12px;
+}
+
+.target-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 2px;
+}
+
+.target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.target:hover {
+  border-color: #3a434f;
+}
+
+.target.on {
+  background: rgba(68, 147, 248, 0.12);
+  border-color: var(--accent);
+}
+
+.target-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+}
+
+.target-note {
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.target-remove {
+  background: none;
+  border: 0;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.target-remove:hover {
+  color: #ff7b72;
+}
+
+.target-empty {
+  grid-column: 1 / -1;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 14px;
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
+.add-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.add-row input[type="text"] {
+  flex: 1;
+  max-width: 420px;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 18px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check input {
+  margin: 3px 0 0;
+}
+
+.check em {
+  display: block;
+  color: var(--faint);
+  font-size: 11.5px;
+  font-style: normal;
+}
+
+#deploy-preview {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.deploy-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---------- run view ---------- */
+
+/* The pods table renders .pill as plain text today; the chip styling is scoped
+   to this panel so the Pods tab looks exactly as it did. */
+#panel-deploy .pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 9px;
+  background: rgba(210, 153, 34, 0.14);
+  color: #e3b341;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+#panel-deploy .pill.ok {
+  background: rgba(63, 185, 80, 0.14);
+  color: #56d364;
+}
+
+#panel-deploy .pill.bad {
+  background: rgba(248, 81, 73, 0.14);
+  color: #ff7b72;
+}
+
+.run-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.run-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.run-elapsed {
+  color: var(--faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.version-card {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 16px;
+  background: rgba(68, 147, 248, 0.1);
+  border: 1px solid rgba(68, 147, 248, 0.35);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+}
+
+.version-card.hidden {
+  display: none;
+}
+
+.version-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.version-value {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: #7cc0ff;
+  word-break: break-all;
+}
+
+.version-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+.step {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 14px;
+}
+
+.step.running {
+  border-left-color: var(--warn);
+}
+
+.step.succeeded {
+  border-left-color: var(--ok);
+}
+
+.step.failed,
+.step.cancelled {
+  border-left-color: var(--bad);
+}
+
+.step.skipped {
+  opacity: 0.6;
+}
+
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.step-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.step-time {
+  flex: 1;
+  color: var(--faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.step-link {
+  color: var(--accent);
+  font-size: 11.5px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.step-link:hover {
+  text-decoration: underline;
+}
+
+.step-exit {
+  color: #ff7b72;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.step-cmd {
+  margin-top: 4px;
+  color: var(--faint);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.log-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.log-note {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--warn);
+}
+
+.log {
+  margin: 0;
+  height: 46vh;
+  min-height: 240px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.log-sep {
+  margin: 10px 0 4px;
+  color: var(--accent);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+}
+
+.log:first-child .log-sep:first-child {
+  margin-top: 0;
+}
+
+#panel-deploy .field.hidden {
+  display: none;
+}
+
+.step.pending {
+  opacity: 0.7;
+}
