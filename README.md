@@ -26,6 +26,13 @@ npm run dev                # auto-restart on file change
 pkill -f "node bin/cli.js" # stop
 ```
 
+`npm start` runs `bin/start.sh`, which clears a stale instance off the port
+before binding — so a second `npm start` replaces the first instead of failing
+with `EADDRINUSE`. It only kills a process whose command line is this repo's
+`bin/cli.js`; anything else holding the port is reported and left alone. The old
+instance gets SIGTERM so its port-forward children shut down too. Use
+`npm run start:plain` for the bare `node bin/cli.js` with no port clearing.
+
 ## Adding a service
 
 Every service/env pair is declared in `services.yaml`:

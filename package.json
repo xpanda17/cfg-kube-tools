@@ -7,7 +7,8 @@
     "kube-tools": "./bin/cli.js"
   },
   "scripts": {
-    "start": "node bin/cli.js",
+    "start": "bash bin/start.sh",
+    "start:plain": "node bin/cli.js",
     "dev": "node --watch bin/cli.js",
     "test": "mocha 'test/**/*.spec.js'"
   },
