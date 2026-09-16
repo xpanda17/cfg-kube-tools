@@ -54,8 +54,13 @@ services.yaml     hand-written registry (to be replaced, see §5)
 ```
 
 Endpoints (one file each under `lib/routes/`): `GET /api/health`,
-`GET /api/services`, `GET /api/pods?service=&env=`, `POST /api/restart`,
-`POST /api/scale`, `GET|POST /api/portforward`, `POST /api/portforward/stop`.
+`GET /api/services`, `GET /api/pods?service=&env=`, `GET /api/cronjobs`,
+`POST /api/restart`, `POST /api/scale`, `POST /api/spec`, `POST /api/job`,
+`GET|POST /api/portforward`, `POST /api/portforward/stop`.
+
+Row actions are built by `podActions()` in `public/app.js`, which returns the
+list a pod supports; the `⋯` trigger is only rendered when that list is
+non-empty, so a visible control is never a no-op.
 
 Implemented: service/env dropdowns, pod table, client-side filter, loading
 indicator, error banner with classified messages. Auto-refresh was built and

@@ -269,6 +269,393 @@ describe('kubectl', () => {
     });
   });
 
+  describe('buildResourceFlags', () => {
+    const kubectl = require('../lib/k8s/kubectl');
+
+    it('renders cpu before memory, on one flag per kind', () => {
+      const built = kubectl.buildResourceFlags({
+        requests: { cpu: '100m', memory: '128Mi' },
+        limits: { cpu: '2', memory: '1Gi' },
+      });
+
+      expect(built.flags).to.deep.equal([
+        '--requests=cpu=100m,memory=128Mi',
+        '--limits=cpu=2,memory=1Gi',
+      ]);
+    });
+
+    it('omits a kind that contributes nothing', () => {
+      const built = kubectl.buildResourceFlags({ requests: { cpu: '500m' } });
+
+      expect(built.flags).to.deep.equal(['--requests=cpu=500m']);
+    });
+
+    it('omits a field that contributes nothing', () => {
+      const built = kubectl.buildResourceFlags({ limits: { memory: '512M' } });
+
+      expect(built.flags).to.deep.equal(['--limits=memory=512M']);
+    });
+
+    it('treats a blank form field as absent', () => {
+      const built = kubectl.buildResourceFlags({
+        requests: { cpu: '100m', memory: '' },
+        limits: { cpu: null, memory: undefined },
+      });
+
+      expect(built.flags).to.deep.equal(['--requests=cpu=100m']);
+    });
+
+    it('rejects a request that is entirely empty', () => {
+      const built = kubectl.buildResourceFlags({ requests: {}, limits: {} });
+
+      expect(built.flags).to.equal(undefined);
+      expect(built.error.kind).to.equal('invalid');
+    });
+
+    it('rejects a missing resources object', () => {
+      expect(kubectl.buildResourceFlags().error.kind).to.equal('invalid');
+    });
+
+    it('accepts the cpu forms kubernetes uses', () => {
+      ['100m', '0.5', '2', '1.25'].forEach((cpu) => {
+        expect(kubectl.buildResourceFlags({ requests: { cpu } }).flags).to.deep.equal([
+          `--requests=cpu=${cpu}`,
+        ]);
+      });
+    });
+
+    it('accepts the memory forms kubernetes uses', () => {
+      ['128Mi', '1Gi', '512M', '2G', '1024', '1.5Gi'].forEach((memory) => {
+        expect(kubectl.buildResourceFlags({ limits: { memory } }).flags).to.deep.equal([
+          `--limits=memory=${memory}`,
+        ]);
+      });
+    });
+
+    it('rejects a cpu value that would be read as a flag', () => {
+      const built = kubectl.buildResourceFlags({ requests: { cpu: '-1' } });
+
+      expect(built.error.message).to.contain('requests.cpu');
+    });
+
+    it('rejects a memory value that would be read as a flag', () => {
+      const built = kubectl.buildResourceFlags({ limits: { memory: '--foo' } });
+
+      expect(built.error.message).to.contain('limits.memory');
+    });
+
+    it('rejects a unit kubernetes does not know', () => {
+      expect(kubectl.buildResourceFlags({ limits: { memory: '128MB' } }).error.kind).to.equal(
+        'invalid'
+      );
+    });
+
+    it('rejects a cpu suffix other than m', () => {
+      expect(kubectl.buildResourceFlags({ requests: { cpu: '100n' } }).error.kind).to.equal(
+        'invalid'
+      );
+    });
+
+    it('rejects an injected second value', () => {
+      expect(
+        kubectl.buildResourceFlags({ requests: { cpu: '100m,memory=64Gi' } }).error.kind
+      ).to.equal('invalid');
+    });
+
+    it('names the first offending field', () => {
+      const built = kubectl.buildResourceFlags({
+        requests: { cpu: 'lots', memory: 'plenty' },
+      });
+
+      expect(built.error.message).to.contain('requests.cpu');
+    });
+  });
+
+  describe('setResources', () => {
+    function stubbedKubectl(calls, result) {
+      return proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': {
+          run: (bin, args, options) => {
+            calls.push({ bin, args, options });
+            return Promise.resolve(result);
+          },
+        },
+      });
+    }
+
+    it('builds the full command as separate arguments', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: 'deployment.apps/dep resource requirements updated', stderr: '', code: 0 });
+
+      const result = await kubectl.setResources(
+        { context: 'ctx-stg', namespace: 'ns-stg', timeoutSeconds: 30 },
+        'athenaapp-deployment',
+        { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '1', memory: '1Gi' } },
+        'athenaapp'
+      );
+
+      expect(calls[0].bin).to.equal('kubectl');
+      expect(calls[0].args).to.deep.equal([
+        'set',
+        'resources',
+        'deployment/athenaapp-deployment',
+        '--requests=cpu=100m,memory=128Mi',
+        '--limits=cpu=1,memory=1Gi',
+        '-c',
+        'athenaapp',
+        '--context',
+        'ctx-stg',
+        '--namespace',
+        'ns-stg',
+        '--request-timeout=30s',
+      ]);
+      expect(result.message).to.equal('deployment.apps/dep resource requirements updated');
+    });
+
+    it('leaves out -c when no container is named', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '', stderr: '', code: 0 });
+
+      await kubectl.setResources({ context: 'c', namespace: 'n' }, 'dep', {
+        requests: { cpu: '100m' },
+      });
+
+      expect(calls[0].args).to.not.include('-c');
+    });
+
+    it('sends only the flag the caller filled in', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '', stderr: '', code: 0 });
+
+      await kubectl.setResources({ context: 'c', namespace: 'n' }, 'dep', {
+        limits: { memory: '2Gi' },
+      });
+
+      expect(calls[0].args).to.include('--limits=memory=2Gi');
+      expect(calls[0].args.join(' ')).to.not.contain('--requests');
+    });
+
+    it('applies the target timeout to kubectl and the executor', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '', stderr: '', code: 0 });
+
+      await kubectl.setResources(
+        { context: 'c', namespace: 'n', timeoutSeconds: 45 },
+        'dep',
+        { requests: { cpu: '100m' } }
+      );
+
+      expect(calls[0].args).to.include('--request-timeout=45s');
+      expect(calls[0].options.timeout).to.be.above(45000);
+    });
+
+    it('falls back to its own message when kubectl says nothing', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '  \n', stderr: '', code: 0 });
+
+      const result = await kubectl.setResources({ context: 'c', namespace: 'n' }, 'dep', {
+        requests: { cpu: '100m' },
+      });
+
+      expect(result.message).to.equal('dep resources updated');
+    });
+
+    it('refuses to spawn kubectl for an invalid quantity', async () => {
+      const calls = [];
+      const kubectl = stubbedKubectl(calls, { stdout: '', stderr: '', code: 0 });
+
+      const result = await kubectl.setResources({ context: 'c', namespace: 'n' }, 'dep', {
+        requests: { cpu: '-1' },
+      });
+
+      expect(calls).to.have.lengthOf(0);
+      expect(result.error.kind).to.equal('invalid');
+    });
+
+    it('classifies a failure rather than throwing', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({
+          stdout: '',
+          stderr: 'Error from server (Forbidden): deployments.apps is forbidden',
+          code: 1,
+        }),
+      });
+
+      const result = await kubectl.setResources({ context: 'c', namespace: 'n' }, 'dep', {
+        requests: { cpu: '100m' },
+      });
+
+      expect(result.error.kind).to.equal('rbac');
+    });
+  });
+
+  describe('createJobFromCronJob', () => {
+    it('builds the full command as separate arguments', async () => {
+      const calls = [];
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': {
+          run: (bin, args, options) => {
+            calls.push({ bin, args, options });
+            return Promise.resolve({ stdout: 'job.batch/manual-run created', stderr: '', code: 0 });
+          },
+        },
+      });
+
+      const result = await kubectl.createJobFromCronJob(
+        { context: 'ctx-stg', namespace: 'ns-stg', timeoutSeconds: 30 },
+        'atwcronexpiringpoints-reminder',
+        'manual-run'
+      );
+
+      expect(calls[0].bin).to.equal('kubectl');
+      expect(calls[0].args).to.deep.equal([
+        'create',
+        'job',
+        'manual-run',
+        '--from=cronjob/atwcronexpiringpoints-reminder',
+        '--context',
+        'ctx-stg',
+        '--namespace',
+        'ns-stg',
+        '--request-timeout=30s',
+      ]);
+      expect(result.message).to.equal('job.batch/manual-run created');
+    });
+
+    it('falls back to its own message when kubectl says nothing', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({ stdout: '', stderr: '', code: 0 }),
+      });
+
+      const result = await kubectl.createJobFromCronJob({ context: 'c', namespace: 'n' }, 'cron', 'run-1');
+
+      expect(result.message).to.equal('run-1 created from cron');
+    });
+
+    it('classifies a name that is already taken', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({
+          stdout: '',
+          stderr: 'error: failed to create job: jobs.batch "run-1" already exists',
+          code: 1,
+        }),
+      });
+
+      const result = await kubectl.createJobFromCronJob({ context: 'c', namespace: 'n' }, 'cron', 'run-1');
+
+      expect(result.error.kind).to.equal('unknown');
+      expect(result.error.raw).to.contain('already exists');
+    });
+  });
+
+  describe('getCronJobs', () => {
+    const payload = {
+      items: [
+        {
+          metadata: { name: 'atwcronexpiringpoints-reminder' },
+          spec: { schedule: '0 1 * * *', suspend: false },
+          status: { lastScheduleTime: '2026-09-16T01:00:00Z' },
+        },
+        {
+          metadata: { name: 'atwcronsettlement' },
+          spec: { schedule: '*/15 * * * *', suspend: true },
+          status: {},
+        },
+      ],
+    };
+
+    it('asks for json, scoped to the target', async () => {
+      const calls = [];
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': {
+          run: (bin, args, options) => {
+            calls.push({ bin, args, options });
+            return Promise.resolve({ stdout: '{"items":[]}', stderr: '', code: 0 });
+          },
+        },
+      });
+
+      await kubectl.getCronJobs({ context: 'ctx-stg', namespace: 'ns-stg', timeoutSeconds: 30 });
+
+      expect(calls[0].bin).to.equal('kubectl');
+      expect(calls[0].args).to.deep.equal([
+        'get',
+        'cronjobs',
+        '--context',
+        'ctx-stg',
+        '--namespace',
+        'ns-stg',
+        '--request-timeout=30s',
+        '-o',
+        'json',
+      ]);
+      expect(calls[0].options.timeout).to.be.above(30000);
+    });
+
+    it('maps each item to the four columns the UI shows', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({ stdout: JSON.stringify(payload), stderr: '', code: 0 }),
+      });
+
+      const result = await kubectl.getCronJobs({ context: 'c', namespace: 'n' });
+
+      expect(result.cronjobs).to.deep.equal([
+        {
+          name: 'atwcronexpiringpoints-reminder',
+          schedule: '0 1 * * *',
+          suspend: false,
+          lastScheduleTime: '2026-09-16T01:00:00Z',
+        },
+        {
+          name: 'atwcronsettlement',
+          schedule: '*/15 * * * *',
+          suspend: true,
+          lastScheduleTime: null,
+        },
+      ]);
+    });
+
+    it('reports a cronjob that has never run as null', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({
+          stdout: JSON.stringify({
+            items: [{ metadata: { name: 'fresh' }, spec: { schedule: '@daily' } }],
+          }),
+          stderr: '',
+          code: 0,
+        }),
+      });
+
+      const result = await kubectl.getCronJobs({ context: 'c', namespace: 'n' });
+
+      expect(result.cronjobs[0].lastScheduleTime).to.equal(null);
+      expect(result.cronjobs[0].suspend).to.equal(false);
+    });
+
+    it('returns an empty list when the namespace has no cronjobs', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({ stdout: '{"items":[]}', stderr: '', code: 0 }),
+      });
+
+      expect((await kubectl.getCronJobs({ context: 'c', namespace: 'n' })).cronjobs).to.deep.equal([]);
+    });
+
+    it('surfaces a failure instead of swallowing it, unlike getScaledObjects', async () => {
+      const kubectl = proxyquire('../lib/k8s/kubectl', {
+        '../core/executor': stubExecutor({
+          stdout: '',
+          stderr: 'Error from server (Forbidden): cronjobs.batch is forbidden',
+          code: 1,
+        }),
+      });
+
+      const result = await kubectl.getCronJobs({ context: 'c', namespace: 'n' });
+
+      expect(result.error.kind).to.equal('rbac');
+      expect(result.cronjobs).to.equal(undefined);
+    });
+  });
+
   describe('classifyError', () => {
     const kubectl = require('../lib/k8s/kubectl');
 

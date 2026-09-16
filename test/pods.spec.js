@@ -218,6 +218,83 @@ describe('pods', () => {
       expect(rows[0].ports).to.deep.equal([3009, 3099]);
     });
 
+    it('exposes container requests and limits so the UI can prefill the spec form', () => {
+      const rows = pods.toRows({
+        items: [{
+          metadata: { name: 'app-1', labels: {}, creationTimestamp: new Date().toISOString() },
+          spec: {
+            containers: [{
+              name: 'athenaapp',
+              resources: {
+                requests: { cpu: '100m', memory: '128Mi' },
+                limits: { cpu: '1', memory: '1Gi' },
+              },
+            }],
+          },
+          status: { phase: 'Running', containerStatuses: [] },
+        }],
+      });
+
+      expect(rows[0].containers).to.deep.equal([{
+        name: 'athenaapp',
+        requests: { cpu: '100m', memory: '128Mi' },
+        limits: { cpu: '1', memory: '1Gi' },
+      }]);
+    });
+
+    it('reports an unset resource as null rather than dropping it', () => {
+      const rows = pods.toRows({
+        items: [{
+          metadata: { name: 'app-1', labels: {}, creationTimestamp: new Date().toISOString() },
+          spec: { containers: [{ name: 'athenaapp', resources: { requests: { cpu: '100m' } } }] },
+          status: { phase: 'Running', containerStatuses: [] },
+        }],
+      });
+
+      expect(rows[0].containers[0]).to.deep.equal({
+        name: 'athenaapp',
+        requests: { cpu: '100m', memory: null },
+        limits: { cpu: null, memory: null },
+      });
+    });
+
+    it('handles a container with no resources block at all', () => {
+      const rows = pods.toRows({
+        items: [{
+          metadata: { name: 'app-1', labels: {}, creationTimestamp: new Date().toISOString() },
+          spec: { containers: [{ name: 'sidecar' }] },
+          status: { phase: 'Running', containerStatuses: [] },
+        }],
+      });
+
+      expect(rows[0].containers[0].requests).to.deep.equal({ cpu: null, memory: null });
+      expect(rows[0].containers[0].limits).to.deep.equal({ cpu: null, memory: null });
+    });
+
+    it('keeps one entry per container, in declaration order', () => {
+      const rows = pods.toRows({
+        items: [{
+          metadata: { name: 'app-1', labels: {}, creationTimestamp: new Date().toISOString() },
+          spec: {
+            containers: [
+              { name: 'athenaapp', resources: { requests: { cpu: '100m' } } },
+              { name: 'istio-proxy', resources: { limits: { memory: '256Mi' } } },
+            ],
+          },
+          status: { phase: 'Running', containerStatuses: [] },
+        }],
+      });
+
+      expect(rows[0].containers.map((c) => c.name)).to.deep.equal(['athenaapp', 'istio-proxy']);
+      expect(rows[0].containers[1].limits.memory).to.equal('256Mi');
+    });
+
+    it('returns an empty container list for a pod with no spec', () => {
+      const rows = pods.toRows(payload, Date.now());
+
+      expect(rows[0].containers).to.deep.equal([]);
+    });
+
     it('no longer exposes the node name', () => {
       const rows = pods.toRows(payload, Date.now());
 

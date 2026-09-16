@@ -21,6 +21,15 @@ const RESTARTABLE = ['app', 'canary', 'sut', 'worker'];
 // categories declare.
 const FORWARDABLE = ['app', 'canary', 'sut'];
 
+// Kubernetes quantity formats. Checked in the form so a typo shows up next to
+// the field instead of coming back as a rejected kubectl call.
+const CPU_PATTERN = /^([0-9]+(\.[0-9]+)?|[0-9]+m)$/;
+const MEMORY_PATTERN = /^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|K|M|G|T)?$/;
+
+// RFC 1123 subdomain: the shape Kubernetes requires for a Job name.
+const JOB_NAME_PATTERN = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+const JOB_NAME_MAX = 63;
+
 const el = {
   service: document.getElementById('service'),
   env: document.getElementById('env'),
@@ -40,6 +49,14 @@ const el = {
   confirmInput: document.getElementById('confirm-input'),
   confirmInputWrap: document.getElementById('confirm-input-wrap'),
   confirmCancel: document.getElementById('confirm-cancel'),
+  form: document.getElementById('form-modal'),
+  formTitle: document.getElementById('form-title'),
+  formBody: document.getElementById('form-body'),
+  formFields: document.getElementById('form-fields'),
+  formError: document.getElementById('form-error'),
+  formCmd: document.getElementById('form-cmd'),
+  formOk: document.getElementById('form-ok'),
+  formCancel: document.getElementById('form-cancel'),
   status: document.getElementById('status'),
   target: document.getElementById('target'),
 };
@@ -158,6 +175,145 @@ function confirmAction(options) {
   });
 }
 
+/**
+ * Shows the multi-field modal and resolves to the entered values, or to null
+ * when cancelled. Fields are described as data so one dialog can serve every
+ * form-shaped action rather than each action growing its own markup.
+ *
+ * @param {Object} options
+ * @param {string} options.title
+ * @param {string} [options.body]
+ * @param {string} options.confirmLabel
+ * @param {Array<Object>} options.fields field descriptors — key, label, optional
+ *   type ('select', otherwise text), value, placeholder, half (half-width),
+ *   options (for selects), validate, invalidMessage and
+ *   onChange(value, set, values)
+ * @param {Function} options.command values => the kubectl preview
+ * @param {Function} [options.validate] values => error string, for rules that
+ *   span more than one field
+ * @returns {Promise<Object|null>}
+ */
+function formAction(options) {
+  const inputs = new Map();
+
+  el.formTitle.textContent = options.title;
+  el.formBody.textContent = options.body || '';
+  el.formBody.classList.toggle('hidden', !options.body);
+  el.formOk.textContent = options.confirmLabel;
+  el.formFields.innerHTML = '';
+
+  const readValues = () => {
+    const values = {};
+
+    inputs.forEach((input, key) => {
+      values[key] = input.value.trim();
+    });
+
+    return values;
+  };
+
+  const sync = () => {
+    const values = readValues();
+    let error = null;
+
+    options.fields.forEach((field) => {
+      const valid = !field.validate || field.validate(values[field.key]);
+
+      inputs.get(field.key).parentElement.classList.toggle('invalid', !valid);
+
+      if (!valid && !error) {
+        error = field.invalidMessage || `${field.label} is not valid.`;
+      }
+    });
+
+    if (!error && options.validate) {
+      error = options.validate(values);
+    }
+
+    el.formError.textContent = error || '';
+    el.formError.classList.toggle('hidden', !error);
+    el.formOk.disabled = Boolean(error);
+    el.formCmd.textContent = options.command(values);
+  };
+
+  const set = (key, value) => {
+    const input = inputs.get(key);
+
+    if (input) {
+      input.value = value;
+    }
+  };
+
+  options.fields.forEach((field) => {
+    const wrap = document.createElement('label');
+
+    wrap.className = `modal-field${field.half ? ' half' : ''}`;
+
+    const caption = document.createElement('span');
+    caption.textContent = field.label;
+    wrap.appendChild(caption);
+
+    let input;
+
+    if (field.type === 'select') {
+      input = document.createElement('select');
+
+      field.options.forEach((option) => {
+        const node = document.createElement('option');
+
+        node.value = option.value;
+        node.textContent = option.label;
+        input.appendChild(node);
+      });
+    } else {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+
+      if (field.placeholder) {
+        input.placeholder = field.placeholder;
+      }
+    }
+
+    input.value = field.value || '';
+    input.addEventListener(field.type === 'select' ? 'change' : 'input', () => {
+      if (field.onChange) {
+        field.onChange(input.value, set, readValues());
+      }
+
+      sync();
+    });
+
+    wrap.appendChild(input);
+    el.formFields.appendChild(wrap);
+    inputs.set(field.key, input);
+  });
+
+  sync();
+
+  // Escape closes without touching returnValue, so clear the previous answer
+  // before showing rather than reading a stale 'ok'.
+  el.form.returnValue = '';
+  el.form.showModal();
+
+  const first = inputs.values().next().value;
+
+  if (first) {
+    first.focus();
+  }
+
+  return new Promise((resolve) => {
+    el.form.addEventListener(
+      'close',
+      () => {
+        resolve(el.form.returnValue === 'ok' ? readValues() : null);
+      },
+      { once: true }
+    );
+  });
+}
+
 async function post(url, body) {
   const res = await fetch(url, {
     method: 'POST',
@@ -240,7 +396,7 @@ async function scaleDeployment(pod) {
     : `${pod.deployment} has no autoscaler, so the replica count is set directly.`;
 
   const answer = await confirmAction({
-    title: `Scale ${pod.deployment}`,
+    title: `Set Replica — ${pod.deployment}`,
     body: `Currently running ${current} pod${current === 1 ? '' : 's'}. ${body}`,
     command: command(current),
     confirmLabel: 'Apply',
@@ -263,7 +419,280 @@ async function scaleDeployment(pod) {
     showBanner(result.steps.join(' · '), null, 'ok');
     await loadPods();
   } catch (err) {
-    showBanner(`Scale failed: ${err.message}`);
+    showBanner(`Set Replica failed: ${err.message}`);
+  }
+}
+
+/**
+ * Reads one resource quantity from a container, defensively: the backend may
+ * omit containers, or a container may declare neither requests nor limits.
+ *
+ * @param {Object} container
+ * @param {string} bucket 'requests' or 'limits'
+ * @param {string} key 'cpu' or 'memory'
+ * @returns {string} the quantity, or '' when unset
+ */
+function resourceValue(container, bucket, key) {
+  const group = container && container[bucket];
+
+  return group && group[key] ? String(group[key]) : '';
+}
+
+/**
+ * Vertical scale: rewrites the CPU and memory requests/limits on the
+ * deployment's pod template. A blank field means "leave unchanged", so it is
+ * dropped from the payload instead of being sent as an empty quantity.
+ *
+ * @param {Object} pod
+ */
+async function updateSpec(pod) {
+  const containers = Array.isArray(pod.containers) ? pod.containers : [];
+  const selected = containers[0] || {};
+  const namespace = el.target.textContent.split(' · ')[0];
+  const fields = [];
+
+  // One container is unambiguous, so only ask when there is a real choice.
+  if (containers.length > 1) {
+    fields.push({
+      key: 'container',
+      label: 'Container',
+      type: 'select',
+      value: selected.name,
+      options: containers.map((item) => ({ value: item.name, label: item.name })),
+      // Prefills belong to the container they were read from; carrying one
+      // container's numbers over to another would apply the wrong values.
+      onChange: (value, set) => {
+        const picked = containers.find((item) => item.name === value) || {};
+
+        set('cpuRequest', resourceValue(picked, 'requests', 'cpu'));
+        set('memoryRequest', resourceValue(picked, 'requests', 'memory'));
+        set('cpuLimit', resourceValue(picked, 'limits', 'cpu'));
+        set('memoryLimit', resourceValue(picked, 'limits', 'memory'));
+      },
+    });
+  }
+
+  // The four quantity fields differ only in the format they accept, which
+  // follows from the resource rather than from the bucket.
+  const quantity = (key, label, bucket, resource, placeholder) => {
+    const pattern = resource === 'cpu' ? CPU_PATTERN : MEMORY_PATTERN;
+    const shape =
+      resource === 'cpu'
+        ? 'a CPU quantity like 100m, 0.5 or 2'
+        : 'a memory quantity like 128Mi or 1Gi';
+
+    fields.push({
+      key,
+      label,
+      half: true,
+      placeholder,
+      value: resourceValue(selected, bucket, resource),
+      validate: (value) => value === '' || pattern.test(value),
+      invalidMessage: `${label} must be blank or ${shape}.`,
+    });
+  };
+
+  quantity('cpuRequest', 'CPU request', 'requests', 'cpu', '100m');
+  quantity('memoryRequest', 'Memory request', 'requests', 'memory', '128Mi');
+  quantity('cpuLimit', 'CPU limit', 'limits', 'cpu', '500m');
+  quantity('memoryLimit', 'Memory limit', 'limits', 'memory', '512Mi');
+
+  const flag = (name, cpu, memory) => {
+    const parts = [];
+
+    if (cpu) {
+      parts.push(`cpu=${cpu}`);
+    }
+
+    if (memory) {
+      parts.push(`memory=${memory}`);
+    }
+
+    return parts.length ? ` --${name}=${parts.join(',')}` : '';
+  };
+
+  const answer = await formAction({
+    title: `Update Spec — ${pod.deployment}`,
+    body:
+      `Sets CPU and memory on ${pod.deployment} in ${namespace}. Changing the ` +
+      'pod template rolls every pod of the deployment. Leave a field blank to ' +
+      'keep its current value.',
+    confirmLabel: 'Apply',
+    fields,
+    validate: (values) =>
+      values.cpuRequest || values.memoryRequest || values.cpuLimit || values.memoryLimit
+        ? null
+        : 'Fill at least one field.',
+    command: (values) =>
+      `kubectl set resources deployment/${pod.deployment}` +
+      (values.container ? ` -c ${values.container}` : '') +
+      flag('requests', values.cpuRequest, values.memoryRequest) +
+      flag('limits', values.cpuLimit, values.memoryLimit),
+  });
+
+  if (!answer) {
+    return;
+  }
+
+  const requests = {};
+  const limits = {};
+
+  if (answer.cpuRequest) {
+    requests.cpu = answer.cpuRequest;
+  }
+
+  if (answer.memoryRequest) {
+    requests.memory = answer.memoryRequest;
+  }
+
+  if (answer.cpuLimit) {
+    limits.cpu = answer.cpuLimit;
+  }
+
+  if (answer.memoryLimit) {
+    limits.memory = answer.memoryLimit;
+  }
+
+  const payload = {
+    service: el.service.value,
+    env: el.env.value,
+    deployment: pod.deployment,
+    requests,
+    limits,
+  };
+
+  if (answer.container) {
+    payload.container = answer.container;
+  }
+
+  try {
+    const body = await post('/api/spec', payload);
+
+    showBanner(body.message, null, 'ok');
+    await loadPods();
+  } catch (err) {
+    showBanner(`Update spec failed: ${err.message}`);
+  }
+}
+
+/**
+ * Builds the suggested Job name: the CronJob plus a local-time stamp, so two
+ * manual runs in the same minute are the only way to collide.
+ *
+ * @param {string} cronjob
+ * @returns {string}
+ */
+function defaultJobName(cronjob) {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  const stamp =
+    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-` +
+    `${pad(now.getHours())}${pad(now.getMinutes())}`;
+  const name = `${cronjob}-manual-${stamp}`;
+
+  // A long CronJob name can push the suggestion past the 63-character limit;
+  // trim rather than hand the user a value the form would reject.
+  return name.length <= JOB_NAME_MAX
+    ? name
+    : name.slice(0, JOB_NAME_MAX).replace(/[^a-z0-9]+$/, '');
+}
+
+/**
+ * Creates a one-off Job from a CronJob. The CronJob list is fetched from the
+ * cluster because pod.group is only a heuristic parent name.
+ *
+ * @param {Object} pod
+ */
+async function createJob(pod) {
+  const params = new URLSearchParams({
+    service: el.service.value,
+    env: el.env.value,
+  });
+
+  let cronjobs = [];
+
+  try {
+    const res = await fetch(`/api/cronjobs?${params}`);
+    const body = await res.json();
+
+    if (!res.ok) {
+      throw new Error((body.error && body.error.message) || 'Request failed');
+    }
+
+    cronjobs = body.cronjobs || [];
+  } catch (err) {
+    showBanner(`Could not load CronJobs: ${err.message}`);
+    return;
+  }
+
+  if (!cronjobs.length) {
+    showBanner('No CronJobs found in this namespace.');
+    return;
+  }
+
+  const match = cronjobs.find((item) => item.name === pod.group) || cronjobs[0];
+  let suggested = defaultJobName(match.name);
+
+  const answer = await formAction({
+    title: 'Create Job',
+    body:
+      `Runs a CronJob once, immediately, in ${el.target.textContent.split(' · ')[0]}. ` +
+      'The schedule itself is left untouched, including for a suspended CronJob.',
+    confirmLabel: 'Create job',
+    fields: [
+      {
+        key: 'cronjob',
+        label: 'CronJob',
+        type: 'select',
+        value: match.name,
+        options: cronjobs.map((item) => ({
+          value: item.name,
+          label:
+            `${item.name}${item.schedule ? ` · ${item.schedule}` : ''}` +
+            `${item.suspend ? ' · suspended' : ''}`,
+        })),
+        onChange: (value, set, values) => {
+          const next = defaultJobName(value);
+
+          // Only re-derive the name while it is still the untouched suggestion,
+          // so a hand-typed name survives switching CronJob.
+          if (values.name === suggested) {
+            set('name', next);
+          }
+
+          suggested = next;
+        },
+      },
+      {
+        key: 'name',
+        label: 'Job name',
+        value: suggested,
+        placeholder: suggested,
+        validate: (value) => JOB_NAME_PATTERN.test(value) && value.length <= JOB_NAME_MAX,
+        invalidMessage:
+          `Job name must be lowercase alphanumeric, '-' or '.', start and end ` +
+          `with alphanumeric, and be at most ${JOB_NAME_MAX} characters.`,
+      },
+    ],
+    command: (values) => `kubectl create job ${values.name} --from=cronjob/${values.cronjob}`,
+  });
+
+  if (!answer) {
+    return;
+  }
+
+  try {
+    const body = await post('/api/job', {
+      service: el.service.value,
+      env: el.env.value,
+      cronjob: answer.cronjob,
+      name: answer.name,
+    });
+
+    showBanner(body.message, null, 'ok');
+    await loadPods();
+  } catch (err) {
+    showBanner(`Create job failed: ${err.message}`);
   }
 }
 
@@ -313,82 +742,109 @@ document.addEventListener('keydown', (event) => {
 });
 
 /**
- * Builds the row menu. Actions live here rather than as inline buttons so the
- * table stays readable and each action can carry a full, unambiguous label.
+ * Collects every action a row can offer. This is the single source of truth for
+ * the menu: the caller asks first and only draws the trigger when the list is
+ * non-empty, so a visible control can never open an empty menu.
  *
  * @param {Object} pod
  * @param {string} category
+ * @returns {Array<Object>} descriptors of {label, hint, tone, run}
+ */
+function podActions(pod, category) {
+  const actions = [];
+
+  if (RESTARTABLE.includes(category) && pod.deployment) {
+    const siblings = pods.filter((item) => item.deployment === pod.deployment).length;
+    const autoscaler = autoscalers[pod.deployment];
+
+    actions.push({
+      label: 'Restart deployment',
+      hint: `rolls all ${siblings} pod${siblings === 1 ? '' : 's'} of ${pod.deployment}`,
+      tone: 'danger',
+      run: () => restartDeployment(pod),
+    });
+
+    actions.push({
+      label: 'Set Replica',
+      hint: autoscaler
+        ? `autoscaled: min ${autoscaler.min}, max ${autoscaler.max}`
+        : 'set the replica count directly',
+      run: () => scaleDeployment(pod),
+    });
+  }
+
+  // Requests and limits live on the Deployment's pod template, so this applies
+  // wherever a Deployment exists — load balancers included.
+  if (pod.deployment) {
+    actions.push({
+      label: 'Update Spec',
+      hint: 'set CPU and memory requests and limits',
+      run: () => updateSpec(pod),
+    });
+  }
+
+  if (category === 'cronjob') {
+    actions.push({
+      label: 'Create Job…',
+      hint: 'run a CronJob once, now',
+      run: () => createJob(pod),
+    });
+  }
+
+  if (FORWARDABLE.includes(category)) {
+    (pod.ports || []).forEach((port) => {
+      const active = findForward(pod.name, port);
+
+      actions.push({
+        label: active ? `Stop port-forward :${port}` : `Port-forward :${port}`,
+        hint: active ? `listening on 127.0.0.1:${port}` : `${port} → 127.0.0.1:${port}`,
+        run: () => toggleForward(pod, port),
+      });
+    });
+  }
+
+  return actions;
+}
+
+/**
+ * Renders the row menu from a precomputed action list. Actions live here rather
+ * than as inline buttons so the table stays readable and each action can carry
+ * a full, unambiguous label.
+ *
+ * @param {Array<Object>} actions
  * @param {DOMRect} anchor
  */
-function openRowMenu(pod, category, anchor) {
+function openRowMenu(actions, anchor) {
   closeMenu();
 
   const menu = document.createElement('div');
   menu.className = 'menu';
 
-  const add = (label, hint, handler, tone) => {
+  actions.forEach((action) => {
     const item = document.createElement('button');
 
-    item.className = `menu-item${tone ? ` ${tone}` : ''}`;
+    item.className = `menu-item${action.tone ? ` ${action.tone}` : ''}`;
 
     const main = document.createElement('span');
-    main.textContent = label;
+    main.textContent = action.label;
     item.appendChild(main);
 
-    if (hint) {
+    if (action.hint) {
       const sub = document.createElement('span');
+
       sub.className = 'menu-hint';
-      sub.textContent = hint;
+      sub.textContent = action.hint;
       item.appendChild(sub);
     }
 
     item.addEventListener('click', (event) => {
       event.stopPropagation();
       closeMenu();
-      handler();
+      action.run();
     });
 
     menu.appendChild(item);
-  };
-
-  if (RESTARTABLE.includes(category) && pod.deployment) {
-    const siblings = pods.filter((item) => item.deployment === pod.deployment).length;
-
-    add(
-      'Restart deployment',
-      `rolls all ${siblings} pod${siblings === 1 ? '' : 's'} of ${pod.deployment}`,
-      () => restartDeployment(pod),
-      'danger'
-    );
-  }
-
-  if (RESTARTABLE.includes(category) && pod.deployment) {
-    const autoscaler = autoscalers[pod.deployment];
-
-    add(
-      'Scale…',
-      autoscaler
-        ? `autoscaled: min ${autoscaler.min}, max ${autoscaler.max}`
-        : 'set the replica count directly',
-      () => scaleDeployment(pod)
-    );
-  }
-
-  if (FORWARDABLE.includes(category)) {
-    pod.ports.forEach((port) => {
-      const active = findForward(pod.name, port);
-
-      add(
-        active ? `Stop port-forward :${port}` : `Port-forward :${port}`,
-        active ? `listening on 127.0.0.1:${port}` : `${port} → 127.0.0.1:${port}`,
-        () => toggleForward(pod, port)
-      );
-    });
-  }
-
-  if (!menu.childElementCount) {
-    return;
-  }
+  });
 
   menu.style.top = `${Math.round(anchor.bottom + 4)}px`;
   menu.style.left = `${Math.round(anchor.right - 240)}px`;
@@ -402,7 +858,7 @@ function renderActionsCell(pod, category) {
   const td = document.createElement('td');
   td.className = 'actions-cell';
 
-  const active = pod.ports
+  const active = (pod.ports || [])
     .map((port) => findForward(pod.name, port))
     .filter(Boolean);
 
@@ -413,16 +869,24 @@ function renderActionsCell(pod, category) {
     link.href = session.url;
     link.target = '_blank';
     link.rel = 'noreferrer';
-    link.textContent = `:${session.port} \u2197`;
+    link.textContent = `:${session.port} ↗`;
     link.title = `Forwarding to ${session.url}`;
     link.addEventListener('click', (event) => event.stopPropagation());
     td.appendChild(link);
   });
 
+  const actions = podActions(pod, category);
+
+  // Nothing to offer means no trigger at all: a button that opens an empty
+  // menu reads as broken.
+  if (!actions.length) {
+    return td;
+  }
+
   const trigger = document.createElement('button');
 
   trigger.className = 'row-menu';
-  trigger.textContent = '\u22ef';
+  trigger.textContent = '⋯';
   trigger.setAttribute('aria-label', 'Actions');
   trigger.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -432,7 +896,7 @@ function renderActionsCell(pod, category) {
       return;
     }
 
-    openRowMenu(pod, category, trigger.getBoundingClientRect());
+    openRowMenu(actions, trigger.getBoundingClientRect());
   });
 
   td.appendChild(trigger);

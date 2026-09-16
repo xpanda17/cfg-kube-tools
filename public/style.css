@@ -637,3 +637,45 @@ a:focus-visible {
 .modal-field.hidden {
   display: none;
 }
+
+
+/* ---------- form modal ---------- */
+
+#form-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 14px;
+}
+
+#form-fields .modal-field {
+  grid-column: 1 / -1;
+}
+
+#form-fields .modal-field span {
+  white-space: nowrap;
+}
+
+/* The shared 90px input is sized for a replica count; these hold names and
+   quantities, so let them take the column. */
+#form-fields .modal-field input,
+#form-fields .modal-field select {
+  flex: 1;
+  min-width: 0;
+}
+
+#form-fields .modal-field.half {
+  grid-column: span 1;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.modal-field.invalid input {
+  border-color: var(--bad);
+}
+
+#form-error {
+  margin: 0 0 12px;
+  color: #ffb4ae;
+  font-size: 12px;
+}

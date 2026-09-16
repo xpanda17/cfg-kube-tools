@@ -73,6 +73,24 @@
     </form>
   </dialog>
 
+  <dialog id="form-modal" class="modal">
+    <form method="dialog">
+      <h2 id="form-title"></h2>
+      <p id="form-body"></p>
+
+      <div id="form-fields"></div>
+
+      <p id="form-error" class="hidden"></p>
+
+      <pre id="form-cmd"></pre>
+
+      <div class="modal-actions">
+        <button value="cancel" class="mini" id="form-cancel">Cancel</button>
+        <button value="ok" class="primary" id="form-ok"></button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/app.js"></script>
 </body>
 </html>

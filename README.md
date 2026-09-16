@@ -158,6 +158,11 @@ Then `pm2 logs kube-tools`, `pm2 restart kube-tools`, `pm2 delete kube-tools`.
 | `GET`  | `/api/health`                   | Status, Node version, uptime.            |
 | `GET`  | `/api/services`                 | Dropdown contents from `services.yaml`.  |
 | `GET`  | `/api/pods?service=&env=`       | Pod rows for that target.                |
+| `GET`  | `/api/cronjobs?service=&env=`   | CronJob names + schedules.               |
+| `POST` | `/api/restart`                  | `kubectl rollout restart`.               |
+| `POST` | `/api/scale`                    | Set Replica; pins a KEDA ScaledObject first. |
+| `POST` | `/api/spec`                     | Update Spec: CPU/memory requests + limits.   |
+| `POST` | `/api/job`                      | Create Job from a CronJob, run once now. |
 
 Cluster failures come back as `502` with a classified error — `auth`,
 `network`, `rbac`, `no-context`, `timeout` — so the UI can say "check your VPN"
@@ -169,6 +174,8 @@ instead of dumping a stack trace.
 - Commands run via `execFile` with an argument array, never through a shell.
 - Only services declared in `services.yaml` can be queried; this is not a terminal.
 - Registry values are validated so a stray `--token=...` cannot become a flag.
+- CPU/memory quantities are pattern-matched on both ends, so a value can never
+  start with `-` and be read by kubectl as a flag.
 - No credential handling — auth is delegated to your existing CLIs.
 
 ## Roadmap
